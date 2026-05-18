@@ -7,7 +7,6 @@
 import asyncio
 import logging
 import time
-import threading
 
 from config import WATCHLIST, SCAN_INTERVAL_SEC
 import bingx_client as bingx
@@ -46,25 +45,31 @@ async def _scan_loop(app):
 
 async def main():
     app = tg_module.build_app()
-    async with app:
-        await app.start()
-        await app.updater.start_polling(drop_pending_updates=True)
 
-        # 傳送啟動通知
-        await app.bot.send_message(
-            chat_id=tg_module.TELEGRAM_CHAT_ID,
-            text=(
-                "🚀 *賽克斯策略 Bot 已上線！*\n\n"
-                f"監控幣對：{len(WATCHLIST)} 個\n"
-                f"掃描間隔：每 {SCAN_INTERVAL_SEC} 秒\n\n"
-                "發現訊號時我會立即通知你 👋\n"
-                "輸入 /balance 可查詢帳戶餘額"
-            ),
-            parse_mode="Markdown"
-        )
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(drop_pending_updates=True)
 
-        # 啟動掃描
+    # 傳送啟動通知
+    await app.bot.send_message(
+        chat_id=tg_module.TELEGRAM_CHAT_ID,
+        text=(
+            "🚀 *賽克斯策略 Bot 已上線！*\n\n"
+            f"監控幣對：{len(WATCHLIST)} 個\n"
+            f"掃描間隔：每 {SCAN_INTERVAL_SEC} 秒\n\n"
+            "發現訊號時我會立即通知你 👋\n"
+            "輸入 /balance 可查詢帳戶餘額"
+        ),
+        parse_mode="Markdown"
+    )
+
+    # 啟動掃描（持續運行）
+    try:
         await _scan_loop(app)
+    finally:
+        await app.updater.stop()
+        await app.stop()
+        await app.shutdown()
 
 if __name__ == "__main__":
     asyncio.run(main())
