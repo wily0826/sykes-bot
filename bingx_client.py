@@ -50,17 +50,33 @@ def get_ticker(symbol: str) -> float:
     return float(data["data"]["lastPrice"])
 
 def get_balance() -> float:
-    """取得 USDT 可用餘額"""
+    """取得永續U本位帳戶 USDT 可用餘額"""
+    # 方法一：用 swap v2 account 端點
     data = _get("/openApi/swap/v2/user/balance")
-    # 處理不同的回傳格式
-    if not isinstance(data, dict):
-        return 0.0
-    inner = data.get("data", {})
-    if isinstance(inner, dict):
-        balance_list = inner.get("balance", [])
-        for asset in balance_list:
-            if isinstance(asset, dict) and asset.get("asset") == "USDT":
-                return float(asset.get("availableMargin", 0))
+    try:
+        # 回傳格式： {"data": {"balance": {"asset":"USDT","balance":"28.04",...}}}
+        inner = data.get("data", {})
+        if isinstance(inner, dict):
+            bal = inner.get("balance", {})
+            # 有時 balance 是 dict，有時是 list
+            if isinstance(bal, dict):
+                return float(bal.get("availableMargin", bal.get("balance", 0)))
+            elif isinstance(bal, list):
+                for item in bal:
+                    if isinstance(item, dict) and item.get("asset") == "USDT":
+                        return float(item.get("availableMargin", item.get("balance", 0)))
+    except Exception:
+        pass
+
+    # 方法二：用 swap v3 account 端點
+    try:
+        data2 = _get("/openApi/swap/v3/user/balance")
+        inner2 = data2.get("data", {})
+        if isinstance(inner2, dict):
+            return float(inner2.get("availableMargin", inner2.get("balance", 0)))
+    except Exception:
+        pass
+
     return 0.0
 
 def set_leverage(symbol: str):
