@@ -1,13 +1,15 @@
+import os
+
 # ============================================================
 #  賽克斯策略 Bot — 設定檔
-#  請填入你自己的 Key，不要分享給任何人
+#  所有敏感資訊從環境變數讀取（Railway Variables）
 # ============================================================
 
-BINGX_API_KEY    = "WkmH3XFTbcYYRzxwdAzTukB97COu8V8RLNFGrtjP6dvWdn4Hddo9bps4eLXHUTOEosrynYo6atDEmZgCQ"
-BINGX_API_SECRET = "YzD6GRCzK68Esfy4g3Kiq7tMOPttGoMQDswqn9UWDBPLloDYMgzyCE6XM6CUUN65cjxlyCw4Xgo8RIG2rwVQ"
+BINGX_API_KEY    = os.environ.get(WkmH3XFTbcYYRzxwdAzTukB97COu8V8RLNFGrtjP6dvWdn4Hddo9bps4eLXHUTOEosrynYo6atDEmZgCQ", "")
+BINGX_API_SECRET = os.environ.get("YzD6GRCzK68Esfy4g3Kiq7tMOPttGoMQDswqn9UWDBPLloDYMgzyCE6XM6CUUN65cjxlyCw4Xgo8RIG2rwVQ", "")
 
-TELEGRAM_BOT_TOKEN = "8687011550:AAFU7N6wRLTCovfkvJRn-n9IoA7J_FyNFvA"
-TELEGRAM_CHAT_ID   = "6364030571"
+TELEGRAM_BOT_TOKEN = os.environ.get("8687011550:AAFU7N6wRLTCovfkvJRn-n9IoA7J_FyNFvA", "")
+TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "6364030571")
 
 # ── 交易設定 ──────────────────────────────────────────────
 TRADE_TYPE       = "PERPETUAL"   # SPOT=現貨 / PERPETUAL=永續合約
