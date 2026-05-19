@@ -149,7 +149,7 @@ def scan_swing(symbol: str, klines: list) -> dict | None:
     # ── 空單：EMA空頭 + MACD負區間 + RSI合理 + 成交量 ───
     if (e_fast[-1] < e_slow[-1] and
         hist < 0 and                        # MACD 在負區間即可（不必剛死叉）
-        (100 - SWING_RSI_MAX) <= (100 - r) <= (100 - SWING_RSI_MIN) and
+        (100 - SWING_RSI_MAX) <= r <= (100 - SWING_RSI_MIN) and
         vol_ok):
         return {
             "symbol":     symbol,
