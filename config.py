@@ -8,7 +8,7 @@ import os
 BINGX_API_KEY      = os.environ.get("BINGX_API_KEY", "")
 BINGX_API_SECRET   = os.environ.get("BINGX_API_SECRET", "")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "6364030571")
+TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 # ── 交易設定 ──────────────────────────────────────────────
 USDT_PER_TRADE  = 20     # 每筆下單金額 (USDT)
