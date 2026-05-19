@@ -1,18 +1,17 @@
 """
-雙週期趨勢策略掃描引擎
+雙週期趨勢策略掃描引擎（放寬版）
 
 波段策略（4H）：
-  - 日線趨勢過濾（EMA200）
   - EMA20 / EMA50 排列
-  - MACD 金叉 / 死叉
+  - MACD 在正區間（不必剛金叉，更容易觸發）
   - RSI 40~65
   - 成交量 > 1.5x 均量
 
 短線策略（1H）：
   - 布林帶下軌反彈 / 上軌反轉
-  - RSI 超賣 < 32 / 超買 > 68
+  - RSI 超賣 < 38 / 超買 > 62（放寬）
   - 成交量 > 2x 均量
-  - K線型態確認（錘子線、吞噬、射擊之星）
+  - K線型態確認
 """
 
 import statistics
@@ -47,7 +46,7 @@ def _rsi(closes: list, period: int = 14) -> float:
     return 100 - (100 / (1 + avg_gain / avg_loss))
 
 def _macd_hist(closes: list):
-    """回傳 (當前histogram, 前一根histogram)，資料不足回傳 (None, None)"""
+    """回傳 (當前histogram, 前一根histogram)"""
     if len(closes) < 37:
         return None, None
     ef = _ema(closes, 12)
@@ -62,7 +61,7 @@ def _macd_hist(closes: list):
     return ml[-1] - sl[-1], ml[-2] - sl[-2]
 
 def _bollinger(closes: list, period: int = 20, std_mult: float = 2.0):
-    """回傳 (upper, mid, lower)，資料不足回傳 (None, None, None)"""
+    """回傳 (upper, mid, lower)"""
     if len(closes) < period + 1:
         return None, None, None
     window = closes[-period:]
@@ -107,76 +106,68 @@ def _is_bear_engulf(k1: dict, k2: dict) -> bool:
 # ── 主策略 ────────────────────────────────────────────────
 
 def scan_swing(symbol: str, klines: list) -> dict | None:
-    """
-    波段策略（4H）
-    條件：EMA 排列 + MACD 金叉/死叉 + RSI + 成交量
-    """
+    """波段策略（4H）"""
     if len(klines) < SWING_EMA_SLOW + 15:
         return None
 
     closes = [k["close"] for k in klines]
     cur    = klines[-1]
 
-    # EMA
     e_fast = _ema(closes, SWING_EMA_FAST)
     e_slow = _ema(closes, SWING_EMA_SLOW)
     if len(e_fast) < 2 or len(e_slow) < 2:
         return None
 
-    # MACD
     hist, hist_prev = _macd_hist(closes)
     if hist is None:
         return None
 
-    # RSI & Volume
-    r        = _rsi(closes)
-    avg_vol  = _avg_volume(klines)
-    vol_ok   = avg_vol > 0 and (cur["volume"] / avg_vol) >= SWING_VOL_MIN
+    r       = _rsi(closes)
+    avg_vol = _avg_volume(klines)
+    if avg_vol == 0:
+        return None
+    vol_ratio = cur["volume"] / avg_vol
+    vol_ok    = vol_ratio >= SWING_VOL_MIN
 
-    # ── 多單：EMA 多頭 + MACD 金叉 + RSI 不追高 ──────────
-    if (e_fast[-1] > e_slow[-1] and          # EMA 多頭排列
-        hist > 0 and hist_prev <= 0 and       # MACD 剛金叉
+    # ── 多單：EMA多頭 + MACD正區間 + RSI合理 + 成交量 ───
+    if (e_fast[-1] > e_slow[-1] and
+        hist > 0 and                        # MACD 在正區間即可（不必剛金叉）
         SWING_RSI_MIN <= r <= SWING_RSI_MAX and
         vol_ok):
-        vol_ratio = cur["volume"] / avg_vol
         return {
             "symbol":     symbol,
             "signal":     "LONG",
             "timeframe":  "4H",
             "pattern":    "📈 波段多單",
             "reason":     (
-                f"EMA{SWING_EMA_FAST}>{SWING_EMA_SLOW} + MACD金叉\n"
+                f"EMA{SWING_EMA_FAST}>{SWING_EMA_SLOW} + MACD多頭\n"
                 f"RSI {r:.1f} | 量比 {vol_ratio:.1f}x"
             ),
-            "confidence": 3,
+            "confidence": 3 if (hist > hist_prev and hist_prev > 0) else 2,
         }
 
-    # ── 空單：EMA 空頭 + MACD 死叉 + RSI 不追殺 ──────────
-    if (e_fast[-1] < e_slow[-1] and          # EMA 空頭排列
-        hist < 0 and hist_prev >= 0 and       # MACD 剛死叉
+    # ── 空單：EMA空頭 + MACD負區間 + RSI合理 + 成交量 ───
+    if (e_fast[-1] < e_slow[-1] and
+        hist < 0 and                        # MACD 在負區間即可（不必剛死叉）
         (100 - SWING_RSI_MAX) <= (100 - r) <= (100 - SWING_RSI_MIN) and
         vol_ok):
-        vol_ratio = cur["volume"] / avg_vol
         return {
             "symbol":     symbol,
             "signal":     "SHORT",
             "timeframe":  "4H",
             "pattern":    "📉 波段空單",
             "reason":     (
-                f"EMA{SWING_EMA_FAST}<{SWING_EMA_SLOW} + MACD死叉\n"
+                f"EMA{SWING_EMA_FAST}<{SWING_EMA_SLOW} + MACD空頭\n"
                 f"RSI {r:.1f} | 量比 {vol_ratio:.1f}x"
             ),
-            "confidence": 3,
+            "confidence": 3 if (hist < hist_prev and hist_prev < 0) else 2,
         }
 
     return None
 
 
 def scan_scalp(symbol: str, klines: list) -> dict | None:
-    """
-    短線策略（1H）
-    條件：布林帶邊軌 + RSI 極值 + 成交量 + K線型態
-    """
+    """短線策略（1H）"""
     if len(klines) < SCALP_BB_PERIOD + 5:
         return None
 
@@ -184,13 +175,11 @@ def scan_scalp(symbol: str, klines: list) -> dict | None:
     cur    = klines[-1]
     prev   = klines[-2]
 
-    # 布林帶（當前 & 前一根）
     upper, _, lower = _bollinger(closes, SCALP_BB_PERIOD, SCALP_BB_STD)
     upper_p, _, lower_p = _bollinger(closes[:-1], SCALP_BB_PERIOD, SCALP_BB_STD)
     if upper is None or upper_p is None:
         return None
 
-    # RSI & Volume
     r       = _rsi(closes)
     avg_vol = _avg_volume(klines)
     if avg_vol == 0:
@@ -199,8 +188,8 @@ def scan_scalp(symbol: str, klines: list) -> dict | None:
     vol_ok    = vol_ratio >= SCALP_VOL_MIN
 
     # ── 多單：下軌反彈 + RSI超賣 + 量確認 + 看漲K線 ──────
-    near_lower = cur["low"] <= lower and cur["close"] > lower
-    rsi_sold   = r < SCALP_RSI_OVERSOLD
+    near_lower  = cur["low"] <= lower and cur["close"] > lower
+    rsi_sold    = r < SCALP_RSI_OVERSOLD   # 放寬至 38
     bull_candle = _is_hammer(cur) or _is_bull_engulf(prev, cur)
 
     if near_lower and rsi_sold and vol_ok and bull_candle:
@@ -219,7 +208,7 @@ def scan_scalp(symbol: str, klines: list) -> dict | None:
 
     # ── 空單：上軌反轉 + RSI超買 + 量確認 + 看跌K線 ──────
     near_upper  = cur["high"] >= upper and cur["close"] < upper
-    rsi_bought  = r > SCALP_RSI_OVERBOUGHT
+    rsi_bought  = r > SCALP_RSI_OVERBOUGHT  # 放寬至 62
     bear_candle = _is_shooting_star(cur) or _is_bear_engulf(prev, cur)
 
     if near_upper and rsi_bought and vol_ok and bear_candle:
