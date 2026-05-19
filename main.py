@@ -22,6 +22,11 @@ logger = logging.getLogger(__name__)
 _sent_signals: dict = {}   # {key: timestamp}
 _open_orders:  dict = {}   # {key: timeframe}
 
+def _on_order_placed(symbol: str, timeframe: str, order_id: str) -> None:
+    key = f"{symbol}_{order_id}"
+    _open_orders[key] = timeframe
+    logger.info(f"📋 持倉新增：{key} ({timeframe})")
+
 def _can_open(timeframe: str, symbol: str) -> bool:
     """檢查是否可以開新單"""
     # 同一幣對已有持倉就不開
@@ -74,7 +79,7 @@ async def _scan_loop() -> None:
         await asyncio.sleep(SCAN_INTERVAL_SEC)
 
 async def main() -> None:
-    app = tg_module.build_app()
+    app = tg_module.build_app(on_order_placed=_on_order_placed)
 
     await app.initialize()
     await app.start()
