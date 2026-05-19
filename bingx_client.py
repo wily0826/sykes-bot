@@ -94,6 +94,20 @@ def set_leverage(symbol: str) -> None:
         except Exception:
             pass
 
+def get_open_positions() -> set:
+    """回傳目前有持倉（positionAmt != 0）的幣對集合"""
+    try:
+        data = _get("/openApi/swap/v2/user/positions")
+        positions = data.get("data", [])
+        if not isinstance(positions, list):
+            return set()
+        return {
+            p["symbol"] for p in positions
+            if isinstance(p, dict) and float(p.get("positionAmt", 0)) != 0
+        }
+    except Exception:
+        return set()
+
 def place_order(symbol: str, side: str, usdt_amount: float,
                 stop_loss_price: float, take_profit_price: float):
     """下市價單，附帶停損停利"""
