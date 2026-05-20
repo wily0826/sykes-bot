@@ -4,11 +4,13 @@ BingX API 客戶端
 import hmac
 import hashlib
 import time
+import logging
 import requests
 from urllib.parse import urlencode
 from config import BINGX_API_KEY, BINGX_API_SECRET, LEVERAGE
 
 BASE_URL = "https://open-api.bingx.com"
+logger = logging.getLogger(__name__)
 
 def _sign(params: dict) -> str:
     query = urlencode(sorted(params.items()))
@@ -24,16 +26,23 @@ def _get(path: str, params: dict = None) -> dict:
     params["timestamp"] = int(time.time() * 1000)
     params["signature"] = _sign(params)
     r = requests.get(BASE_URL + path, params=params, headers=_headers(), timeout=10)
-    r.raise_for_status()
-    return r.json()
+    data = r.json()
+    # 印出完整錯誤方便 debug
+    if isinstance(data, dict) and data.get("code", 0) != 0:
+        logger.error(f"BingX API 錯誤 [{path}] code={data.get('code')} msg={data.get('msg')}")
+        raise Exception(f"API錯誤 code={data.get('code')} msg={data.get('msg')}")
+    return data
 
 def _post(path: str, params: dict = None) -> dict:
     params = dict(params or {})
     params["timestamp"] = int(time.time() * 1000)
     params["signature"] = _sign(params)
     r = requests.post(BASE_URL + path, params=params, headers=_headers(), timeout=10)
-    r.raise_for_status()
-    return r.json()
+    data = r.json()
+    if isinstance(data, dict) and data.get("code", 0) != 0:
+        logger.error(f"BingX API 錯誤 [{path}] code={data.get('code')} msg={data.get('msg')}")
+        raise Exception(f"API錯誤 code={data.get('code')} msg={data.get('msg')}")
+    return data
 
 def get_klines(symbol: str, interval: str = "1h", limit: int = 100) -> list:
     """取得K線資料"""
@@ -91,22 +100,8 @@ def set_leverage(symbol: str) -> None:
             _post("/openApi/swap/v2/trade/leverage", {
                 "symbol": symbol, "side": side, "leverage": LEVERAGE,
             })
-        except Exception:
-            pass
-
-def get_open_positions() -> set:
-    """回傳目前有持倉（positionAmt != 0）的幣對集合"""
-    try:
-        data = _get("/openApi/swap/v2/user/positions")
-        positions = data.get("data", [])
-        if not isinstance(positions, list):
-            return set()
-        return {
-            p["symbol"] for p in positions
-            if isinstance(p, dict) and float(p.get("positionAmt", 0)) != 0
-        }
-    except Exception:
-        return set()
+        except Exception as e:
+            logger.warning(f"設定槓桿失敗 {symbol} {side}：{e}")
 
 def place_order(symbol: str, side: str, usdt_amount: float,
                 stop_loss_price: float, take_profit_price: float):
@@ -114,10 +109,8 @@ def place_order(symbol: str, side: str, usdt_amount: float,
     price = get_ticker(symbol)
     qty   = round(usdt_amount * LEVERAGE / price, 4)
     if qty <= 0:
-        raise ValueError(f"計算出的數量異常：{qty}")
-
+        raise ValueError(f"數量異常：{qty}")
     set_leverage(symbol)
-
     params = {
         "symbol":       symbol,
         "side":         "BUY" if side == "LONG" else "SELL",
