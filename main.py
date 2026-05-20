@@ -22,24 +22,12 @@ logger = logging.getLogger(__name__)
 _sent_signals: dict = {}   # {key: timestamp}
 _open_orders:  dict = {}   # {key: timeframe}
 
-def _on_order_placed(symbol: str, timeframe: str, order_id: str) -> None:
-    _open_orders[symbol] = timeframe
-    logger.info(f"📋 持倉新增：{symbol} ({timeframe})")
-
-async def _sync_positions() -> None:
-    """從 BingX 查詢實際持倉，移除已平倉的記錄"""
-    open_symbols = await asyncio.get_event_loop().run_in_executor(
-        None, bingx.get_open_positions
-    )
-    closed = [s for s in list(_open_orders) if s not in open_symbols]
-    for s in closed:
-        del _open_orders[s]
-        logger.info(f"📋 持倉移除（已平倉）：{s}")
-
 def _can_open(timeframe: str, symbol: str) -> bool:
     """檢查是否可以開新單"""
-    if symbol in _open_orders:
-        return False
+    # 同一幣對已有持倉就不開
+    for k in _open_orders:
+        if symbol in k:
+            return False
     total  = len(_open_orders)
     swings = sum(1 for tf in _open_orders.values() if tf == "4H")
     scalps = sum(1 for tf in _open_orders.values() if tf == "1H")
@@ -82,12 +70,11 @@ async def _scan_once() -> None:
 async def _scan_loop() -> None:
     logger.info(f"🔍 掃描啟動：{', '.join(WATCHLIST)}")
     while True:
-        await _sync_positions()
         await _scan_once()
         await asyncio.sleep(SCAN_INTERVAL_SEC)
 
 async def main() -> None:
-    app = tg_module.build_app(on_order_placed=_on_order_placed)
+    app = tg_module.build_app()
 
     await app.initialize()
     await app.start()
