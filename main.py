@@ -27,7 +27,6 @@ def _on_order_placed(symbol: str, timeframe: str, order_id: str) -> None:
     logger.info(f"📋 持倉新增：{symbol} ({timeframe})")
 
 async def _sync_positions() -> None:
-    """同步實際持倉狀態"""
     try:
         open_symbols = await asyncio.get_event_loop().run_in_executor(
             None, bingx.get_open_positions
@@ -52,7 +51,6 @@ def _can_open(timeframe: str, symbol: str) -> bool:
 
 async def _scan_once() -> None:
     for symbol in WATCHLIST:
-        # 波段策略（4H）
         if _can_open("4H", symbol):
             try:
                 klines = bingx.get_klines(symbol, interval="4h", limit=80)
@@ -69,7 +67,6 @@ async def _scan_once() -> None:
             except Exception as e:
                 logger.error(f"波段掃描 {symbol} 錯誤：{e}")
 
-        # 短線策略（1H）
         if _can_open("1H", symbol):
             try:
                 klines = bingx.get_klines(symbol, interval="1h", limit=60)
@@ -94,12 +91,14 @@ async def _scan_loop() -> None:
         await asyncio.sleep(SCAN_INTERVAL_SEC)
 
 async def main() -> None:
-    app = tg_module.build_app(on_order_placed=_on_order_placed)
+    # 同時相容新版（有 on_order_placed）和舊版 telegram_bot
+    try:
+        app = tg_module.build_app(on_order_placed=_on_order_placed)
+    except TypeError:
+        app = tg_module.build_app()
 
     await app.initialize()
     await app.start()
-
-    # 等待 3 秒讓舊實例完全關閉，避免 Telegram Conflict
     await asyncio.sleep(3)
     await app.updater.start_polling(drop_pending_updates=True)
 
