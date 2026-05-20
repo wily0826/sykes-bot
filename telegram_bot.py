@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 _pending: dict = {}
 _app: Application = None
+_on_order_placed = None  # callback(symbol, timeframe, order_id)
 
 async def send_signal(signal: dict) -> None:
     """發送訊號通知到 Telegram"""
@@ -94,6 +95,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             take_profit_price=signal["tp"],
         )
         if order_id:
+            if _on_order_placed:
+                _on_order_placed(signal["symbol"], signal["timeframe"], order_id)
             await query.edit_message_text(
                 f"✅ 下單成功！\n"
                 f"幣對：{signal['symbol']}\n"
@@ -144,8 +147,9 @@ async def _cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
-def build_app() -> Application:
-    global _app
+def build_app(on_order_placed=None) -> Application:
+    global _app, _on_order_placed
+    _on_order_placed = on_order_placed
     _app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     _app.add_handler(CommandHandler("start",   _cmd_start))
     _app.add_handler(CommandHandler("balance", _cmd_balance))
