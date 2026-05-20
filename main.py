@@ -19,15 +19,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-_sent_signals: dict = {}   # {key: timestamp}
-_open_orders:  dict = {}   # {key: timeframe}
+_sent_signals: dict = {}
+_open_orders:  dict = {}
+
+def _on_order_placed(symbol: str, timeframe: str, order_id: str) -> None:
+    _open_orders[symbol] = timeframe
+    logger.info(f"📋 持倉新增：{symbol} ({timeframe})")
+
+async def _sync_positions() -> None:
+    """同步實際持倉狀態"""
+    try:
+        open_symbols = await asyncio.get_event_loop().run_in_executor(
+            None, bingx.get_open_positions
+        )
+        closed = [s for s in list(_open_orders) if s not in open_symbols]
+        for s in closed:
+            del _open_orders[s]
+            logger.info(f"📋 持倉移除（已平倉）：{s}")
+    except Exception as e:
+        logger.warning(f"同步持倉失敗：{e}")
 
 def _can_open(timeframe: str, symbol: str) -> bool:
-    """檢查是否可以開新單"""
-    # 同一幣對已有持倉就不開
-    for k in _open_orders:
-        if symbol in k:
-            return False
+    if symbol in _open_orders:
+        return False
     total  = len(_open_orders)
     swings = sum(1 for tf in _open_orders.values() if tf == "4H")
     scalps = sum(1 for tf in _open_orders.values() if tf == "1H")
@@ -37,12 +51,14 @@ def _can_open(timeframe: str, symbol: str) -> bool:
     return True
 
 async def _scan_once() -> None:
-    """掃描一輪所有幣對"""
     for symbol in WATCHLIST:
         # 波段策略（4H）
         if _can_open("4H", symbol):
             try:
                 klines = bingx.get_klines(symbol, interval="4h", limit=80)
+                if not klines:
+                    logger.warning(f"⚠️ 波段 {symbol} 取得 0 根K線，跳過")
+                    continue
                 sig = strategy.scan_swing(symbol, klines)
                 if sig:
                     key = f"{symbol}_{sig['signal']}_4H"
@@ -57,6 +73,9 @@ async def _scan_once() -> None:
         if _can_open("1H", symbol):
             try:
                 klines = bingx.get_klines(symbol, interval="1h", limit=60)
+                if not klines:
+                    logger.warning(f"⚠️ 短線 {symbol} 取得 0 根K線，跳過")
+                    continue
                 sig = strategy.scan_scalp(symbol, klines)
                 if sig:
                     key = f"{symbol}_{sig['signal']}_1H"
@@ -70,14 +89,18 @@ async def _scan_once() -> None:
 async def _scan_loop() -> None:
     logger.info(f"🔍 掃描啟動：{', '.join(WATCHLIST)}")
     while True:
+        await _sync_positions()
         await _scan_once()
         await asyncio.sleep(SCAN_INTERVAL_SEC)
 
 async def main() -> None:
-    app = tg_module.build_app()
+    app = tg_module.build_app(on_order_placed=_on_order_placed)
 
     await app.initialize()
     await app.start()
+
+    # 等待 3 秒讓舊實例完全關閉，避免 Telegram Conflict
+    await asyncio.sleep(3)
     await app.updater.start_polling(drop_pending_updates=True)
 
     await app.bot.send_message(

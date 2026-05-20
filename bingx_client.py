@@ -45,21 +45,33 @@ def _post(path: str, params: dict = None) -> dict:
     return data
 
 def get_klines(symbol: str, interval: str = "1h", limit: int = 100) -> list:
-    """取得K線資料"""
+    """取得K線資料，相容陣列與字典兩種回傳格式"""
     data = _get("/openApi/swap/v3/quote/klines", {
         "symbol": symbol, "interval": interval, "limit": limit
     })
     result = []
     for k in data.get("data", []):
         try:
-            result.append({
-                "open":   float(k[1]),
-                "high":   float(k[2]),
-                "low":    float(k[3]),
-                "close":  float(k[4]),
-                "volume": float(k[5]),
-            })
-        except (IndexError, ValueError):
+            # 格式一：陣列 [time, open, high, low, close, volume, ...]
+            if isinstance(k, (list, tuple)):
+                result.append({
+                    "open":   float(k[1]),
+                    "high":   float(k[2]),
+                    "low":    float(k[3]),
+                    "close":  float(k[4]),
+                    "volume": float(k[5]),
+                })
+            # 格式二：字典 {"open": ..., "high": ..., ...}
+            elif isinstance(k, dict):
+                result.append({
+                    "open":   float(k.get("open",   k.get("o", 0))),
+                    "high":   float(k.get("high",   k.get("h", 0))),
+                    "low":    float(k.get("low",    k.get("l", 0))),
+                    "close":  float(k.get("close",  k.get("c", 0))),
+                    "volume": float(k.get("volume", k.get("v", 0))),
+                })
+        except (IndexError, ValueError, KeyError, TypeError):
+            # 捕捉所有格式解析錯誤，跳過這根K線
             continue
     return result
 
@@ -92,6 +104,20 @@ def get_balance() -> float:
     except Exception:
         pass
     return 0.0
+
+def get_open_positions() -> set:
+    """回傳目前有持倉的幣對集合"""
+    try:
+        data = _get("/openApi/swap/v2/user/positions")
+        positions = data.get("data", [])
+        if not isinstance(positions, list):
+            return set()
+        return {
+            p["symbol"] for p in positions
+            if isinstance(p, dict) and float(p.get("positionAmt", 0)) != 0
+        }
+    except Exception:
+        return set()
 
 def set_leverage(symbol: str) -> None:
     """多空兩邊都設定槓桿"""
