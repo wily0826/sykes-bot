@@ -1,5 +1,5 @@
 """
-主程式入口 — 雙週期趨勢策略
+主程式入口 — 賽克斯策略
 """
 import asyncio
 import logging
@@ -34,7 +34,7 @@ async def _sync_positions() -> None:
         closed = [s for s in list(_open_orders) if s not in open_symbols]
         for s in closed:
             del _open_orders[s]
-            logger.info(f"📋 持倉移除（已平倉）：{s}")
+            logger.info(f"📋 持倉移除：{s}")
     except Exception as e:
         logger.warning(f"同步持倉失敗：{e}")
 
@@ -51,47 +51,48 @@ def _can_open(timeframe: str, symbol: str) -> bool:
 
 async def _scan_once() -> None:
     for symbol in WATCHLIST:
-        if _can_open("4H", symbol):
-            try:
-                klines = bingx.get_klines(symbol, interval="4h", limit=80)
-                if not klines:
-                    logger.warning(f"⚠️ 波段 {symbol} 取得 0 根K線，跳過")
-                    continue
-                sig = strategy.scan_swing(symbol, klines)
-                if sig:
-                    key = f"{symbol}_{sig['signal']}_4H"
-                    if time.time() - _sent_signals.get(key, 0) > SIGNAL_COOLDOWN:
-                        logger.info(f"📡 波段訊號：{key}")
-                        await tg_module.send_signal(sig)
-                        _sent_signals[key] = time.time()
-            except Exception as e:
-                logger.error(f"波段掃描 {symbol} 錯誤：{e}")
-
+        # ── 1H 短線：四大型態 ─────────────────────────────
         if _can_open("1H", symbol):
             try:
                 klines = bingx.get_klines(symbol, interval="1h", limit=60)
                 if not klines:
-                    logger.warning(f"⚠️ 短線 {symbol} 取得 0 根K線，跳過")
+                    logger.warning(f"⚠️ 1H {symbol} 取得 0 根K線")
                     continue
-                sig = strategy.scan_scalp(symbol, klines)
+                sig = strategy.scan_1h(symbol, klines)
                 if sig:
                     key = f"{symbol}_{sig['signal']}_1H"
                     if time.time() - _sent_signals.get(key, 0) > SIGNAL_COOLDOWN:
-                        logger.info(f"📡 短線訊號：{key}")
+                        logger.info(f"📡 短線訊號：{key} {sig['pattern']}")
                         await tg_module.send_signal(sig)
                         _sent_signals[key] = time.time()
             except Exception as e:
                 logger.error(f"短線掃描 {symbol} 錯誤：{e}")
 
+        # ── 4H 波段：FGD + Short the Pump ────────────────
+        if _can_open("4H", symbol):
+            try:
+                klines = bingx.get_klines(symbol, interval="4h", limit=60)
+                if not klines:
+                    logger.warning(f"⚠️ 4H {symbol} 取得 0 根K線")
+                    continue
+                sig = strategy.scan_4h(symbol, klines)
+                if sig:
+                    key = f"{symbol}_{sig['signal']}_4H"
+                    if time.time() - _sent_signals.get(key, 0) > SIGNAL_COOLDOWN:
+                        logger.info(f"📡 波段訊號：{key} {sig['pattern']}")
+                        await tg_module.send_signal(sig)
+                        _sent_signals[key] = time.time()
+            except Exception as e:
+                logger.error(f"波段掃描 {symbol} 錯誤：{e}")
+
 async def _scan_loop() -> None:
-    logger.info(f"🔍 掃描啟動：{', '.join(WATCHLIST)}")
+    logger.info(f"🔍 賽克斯策略掃描啟動：{', '.join(WATCHLIST)}")
     while True:
         await _sync_positions()
         await _scan_once()
         await asyncio.sleep(SCAN_INTERVAL_SEC)
 
 async def main() -> None:
-    # 同時相容新版（有 on_order_placed）和舊版 telegram_bot
     try:
         app = tg_module.build_app(on_order_placed=_on_order_placed)
     except TypeError:
@@ -105,9 +106,11 @@ async def main() -> None:
     await app.bot.send_message(
         chat_id=tg_module.TELEGRAM_CHAT_ID,
         text=(
-            "🚀 幣圈趨勢策略 Bot 已上線！\n\n"
-            "📈 波段策略（4H）：EMA + MACD + RSI\n"
-            "⚡ 短線策略（1H）：布林帶 + RSI + K線\n\n"
+            "🚀 賽克斯策略 Bot 已上線！\n\n"
+            "🟢 First Green Day — 連跌後爆量陽線做多\n"
+            "🚀 Gap and Go — 跳空高開持續做多\n"
+            "🔴 Short the Pump — 炒作高峰做空\n"
+            "📉 Bounce Failure — 反彈失敗做空\n\n"
             f"監控：{' / '.join(WATCHLIST)}\n"
             "停損 5% | 停利 15% | 槓桿 3倍\n\n"
             "輸入 /status 查看狀態"

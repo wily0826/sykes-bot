@@ -1,37 +1,22 @@
 """
-雙週期趨勢策略掃描引擎（放寬版）
+賽克斯策略掃描引擎（加密貨幣版）
 
-波段策略（4H）：
-  - EMA20 / EMA50 排列
-  - MACD 在正區間（不必剛金叉，更容易觸發）
-  - RSI 40~65
-  - 成交量 > 1.5x 均量
+四大型態：
+  1H 短線：
+    - First Green Day  → 連跌後首根大量陽線，做多
+    - Gap and Go       → 跳空高開持續上漲，做多
+    - Short the Pump   → 炒作高峰反轉，做空
+    - Bounce Failure   → 反彈失敗再破低，做空
 
-短線策略（1H）：
-  - 布林帶下軌反彈 / 上軌反轉
-  - RSI 超賣 < 38 / 超買 > 62（放寬）
-  - 成交量 > 2x 均量
-  - K線型態確認
+  4H 波段：
+    - First Green Day  → 同上，週期更長
+    - Short the Pump   → 同上，週期更長
 """
 
 import statistics
-from config import (
-    SWING_EMA_FAST, SWING_EMA_SLOW,
-    SWING_RSI_MIN, SWING_RSI_MAX, SWING_VOL_MIN,
-    SCALP_BB_PERIOD, SCALP_BB_STD,
-    SCALP_RSI_OVERSOLD, SCALP_RSI_OVERBOUGHT, SCALP_VOL_MIN,
-)
 
-# ── 指標計算 ──────────────────────────────────────────────
 
-def _ema(values: list, period: int) -> list:
-    if len(values) < period:
-        return []
-    k = 2 / (period + 1)
-    result = [sum(values[:period]) / period]
-    for v in values[period:]:
-        result.append(v * k + result[-1] * (1 - k))
-    return result
+# ── 共用指標 ──────────────────────────────────────────────
 
 def _rsi(closes: list, period: int = 14) -> float:
     if len(closes) < period + 2:
@@ -45,184 +30,214 @@ def _rsi(closes: list, period: int = 14) -> float:
     avg_loss = sum(losses) / period or 1e-9
     return 100 - (100 / (1 + avg_gain / avg_loss))
 
-def _macd_hist(closes: list):
-    """回傳 (當前histogram, 前一根histogram)"""
-    if len(closes) < 37:
-        return None, None
-    ef = _ema(closes, 12)
-    es = _ema(closes, 26)
-    min_len = min(len(ef), len(es))
-    ml = [ef[-(min_len - i)] - es[-(min_len - i)] for i in range(min_len)]
-    if len(ml) < 11:
-        return None, None
-    sl = _ema(ml, 9)
-    if len(sl) < 2:
-        return None, None
-    return ml[-1] - sl[-1], ml[-2] - sl[-2]
-
-def _bollinger(closes: list, period: int = 20, std_mult: float = 2.0):
-    """回傳 (upper, mid, lower)"""
-    if len(closes) < period + 1:
-        return None, None, None
-    window = closes[-period:]
-    mid = statistics.mean(window)
-    std = statistics.stdev(window)
-    return mid + std_mult * std, mid, mid - std_mult * std
 
 def _avg_volume(klines: list, lookback: int = 20) -> float:
     vols = [k["volume"] for k in klines[-lookback - 1:-1]]
     return statistics.mean(vols) if vols else 1.0
 
-# ── K線型態 ───────────────────────────────────────────────
 
-def _is_hammer(k: dict) -> bool:
-    body = abs(k["close"] - k["open"])
-    if body == 0:
+def _is_valid(klines: list, min_len: int = 25) -> bool:
+    """基本資料驗證"""
+    if len(klines) < min_len:
         return False
-    lower_wick = min(k["open"], k["close"]) - k["low"]
-    upper_wick = k["high"] - max(k["open"], k["close"])
-    return lower_wick >= body * 2 and upper_wick <= body * 0.5
+    for k in klines[-5:]:
+        if any(v <= 0 for v in [k["open"], k["high"], k["low"], k["close"]]):
+            return False
+    return True
 
-def _is_shooting_star(k: dict) -> bool:
-    body = abs(k["close"] - k["open"])
-    if body == 0:
-        return False
-    upper_wick = k["high"] - max(k["open"], k["close"])
-    lower_wick = min(k["open"], k["close"]) - k["low"]
-    return upper_wick >= body * 2 and lower_wick <= body * 0.5
 
-def _is_bull_engulf(k1: dict, k2: dict) -> bool:
-    return (k1["close"] < k1["open"] and
-            k2["close"] > k2["open"] and
-            k2["open"] <= k1["close"] and
-            k2["close"] >= k1["open"])
+# ── 四大型態 ──────────────────────────────────────────────
 
-def _is_bear_engulf(k1: dict, k2: dict) -> bool:
-    return (k1["close"] > k1["open"] and
-            k2["close"] < k2["open"] and
-            k2["open"] >= k1["close"] and
-            k2["close"] <= k1["open"])
-
-# ── 主策略 ────────────────────────────────────────────────
-
-def scan_swing(symbol: str, klines: list) -> dict | None:
-    """波段策略（4H）"""
-    if len(klines) < SWING_EMA_SLOW + 15:
-        return None
-
-    closes = [k["close"] for k in klines]
+def _first_green_day(symbol: str, klines: list, timeframe: str) -> dict | None:
+    """
+    First Green Day — 做多
+    條件：
+      - 前 3 根都是陰線
+      - 當根是陽線
+      - 成交量 > 均量 2 倍
+      - RSI < 65（不追高）
+    """
     cur    = klines[-1]
+    closes = [k["close"] for k in klines]
 
-    e_fast = _ema(closes, SWING_EMA_FAST)
-    e_slow = _ema(closes, SWING_EMA_SLOW)
-    if len(e_fast) < 2 or len(e_slow) < 2:
+    if cur["close"] <= cur["open"]:
         return None
 
-    hist, hist_prev = _macd_hist(closes)
-    if hist is None:
+    prior_reds = all(
+        klines[-i]["close"] < klines[-i]["open"]
+        for i in range(2, 5)
+    )
+    if not prior_reds:
         return None
 
-    r       = _rsi(closes)
-    avg_vol = _avg_volume(klines)
-    if avg_vol == 0:
+    avg_vol   = _avg_volume(klines)
+    vol_ratio = cur["volume"] / avg_vol if avg_vol > 0 else 0
+    if vol_ratio < 2.0:
         return None
-    vol_ratio = cur["volume"] / avg_vol
-    vol_ok    = vol_ratio >= SWING_VOL_MIN
 
-    # ── 多單：EMA多頭 + MACD正區間 + RSI合理 + 成交量 ───
-    if (e_fast[-1] > e_slow[-1] and
-        hist > 0 and                        # MACD 在正區間即可（不必剛金叉）
-        SWING_RSI_MIN <= r <= SWING_RSI_MAX and
-        vol_ok):
-        return {
-            "symbol":     symbol,
-            "signal":     "LONG",
-            "timeframe":  "4H",
-            "pattern":    "📈 波段多單",
-            "reason":     (
-                f"EMA{SWING_EMA_FAST}>{SWING_EMA_SLOW} + MACD多頭\n"
-                f"RSI {r:.1f} | 量比 {vol_ratio:.1f}x"
-            ),
-            "confidence": 3 if (hist > hist_prev and hist_prev > 0) else 2,
-        }
+    rsi = _rsi(closes)
+    if rsi >= 65:
+        return None
 
-    # ── 空單：EMA空頭 + MACD負區間 + RSI合理 + 成交量 ───
-    if (e_fast[-1] < e_slow[-1] and
-        hist < 0 and                        # MACD 在負區間即可（不必剛死叉）
-        (100 - SWING_RSI_MAX) <= (100 - r) <= (100 - SWING_RSI_MIN) and
-        vol_ok):
-        return {
-            "symbol":     symbol,
-            "signal":     "SHORT",
-            "timeframe":  "4H",
-            "pattern":    "📉 波段空單",
-            "reason":     (
-                f"EMA{SWING_EMA_FAST}<{SWING_EMA_SLOW} + MACD空頭\n"
-                f"RSI {r:.1f} | 量比 {vol_ratio:.1f}x"
-            ),
-            "confidence": 3 if (hist < hist_prev and hist_prev < 0) else 2,
-        }
+    return {
+        "symbol":     symbol,
+        "signal":     "LONG",
+        "timeframe":  timeframe,
+        "pattern":    "🟢 First Green Day",
+        "reason":     f"連跌後首根大量陽線\nRSI {rsi:.1f} | 量比 {vol_ratio:.1f}x",
+        "confidence": 3 if vol_ratio >= 3.0 else 2,
+    }
 
+
+def _gap_and_go(symbol: str, klines: list, timeframe: str) -> dict | None:
+    """
+    Gap and Go — 做多
+    條件：
+      - 當根開盤比前根收盤高出 1% 以上（跳空）
+      - 當根是陽線（持續上漲）
+      - 成交量 > 均量 2 倍
+      - RSI < 70
+    """
+    cur    = klines[-1]
+    prev   = klines[-2]
+    closes = [k["close"] for k in klines]
+
+    if prev["close"] <= 0:
+        return None
+
+    gap_pct = (cur["open"] - prev["close"]) / prev["close"]
+    if gap_pct < 0.01:
+        return None
+
+    if cur["close"] <= cur["open"]:
+        return None
+
+    avg_vol   = _avg_volume(klines)
+    vol_ratio = cur["volume"] / avg_vol if avg_vol > 0 else 0
+    if vol_ratio < 2.0:
+        return None
+
+    rsi = _rsi(closes)
+    if rsi >= 70:
+        return None
+
+    return {
+        "symbol":     symbol,
+        "signal":     "LONG",
+        "timeframe":  timeframe,
+        "pattern":    "🚀 Gap and Go",
+        "reason":     f"跳空 {gap_pct*100:.1f}% 開盤持續上漲\nRSI {rsi:.1f} | 量比 {vol_ratio:.1f}x",
+        "confidence": 3 if gap_pct >= 0.02 else 2,
+    }
+
+
+def _short_the_pump(symbol: str, klines: list, timeframe: str) -> dict | None:
+    """
+    Short the Pump — 做空
+    條件：
+      - 前 5 根最高點比 6 根前收盤高出 5% 以上（短期大漲）
+      - 當根是陰線（反轉訊號）
+      - RSI > 65（過熱）
+    """
+    cur    = klines[-1]
+    closes = [k["close"] for k in klines]
+
+    if cur["close"] >= cur["open"]:
+        return None
+
+    if len(klines) < 7:
+        return None
+
+    base_price = klines[-7]["close"]
+    if base_price <= 0:
+        return None
+
+    rally_high = max(k["high"] for k in klines[-6:-1])
+    rally_pct  = (rally_high - base_price) / base_price
+    if rally_pct < 0.05:
+        return None
+
+    rsi = _rsi(closes)
+    if rsi <= 65:
+        return None
+
+    avg_vol   = _avg_volume(klines)
+    vol_ratio = cur["volume"] / avg_vol if avg_vol > 0 else 0
+
+    return {
+        "symbol":     symbol,
+        "signal":     "SHORT",
+        "timeframe":  timeframe,
+        "pattern":    "🔴 Short the Pump",
+        "reason":     f"漲幅 {rally_pct*100:.1f}% 後反轉陰線\nRSI {rsi:.1f} 過熱 | 量比 {vol_ratio:.1f}x",
+        "confidence": 3 if rsi >= 75 else 2,
+    }
+
+
+def _bounce_failure(symbol: str, klines: list, timeframe: str) -> dict | None:
+    """
+    Bounce Failure — 做空
+    條件：
+      - 前 2 根有陽線（反彈）
+      - 反彈高點未超過近 10 根最高點（失敗）
+      - 當根是陰線（反轉）
+      - RSI > 50
+    """
+    cur    = klines[-1]
+    closes = [k["close"] for k in klines]
+
+    if cur["close"] >= cur["open"]:
+        return None
+
+    if len(klines) < 12:
+        return None
+
+    prev_green  = klines[-2]["close"] > klines[-2]["open"]
+    prev2_green = klines[-3]["close"] > klines[-3]["open"]
+    if not (prev_green or prev2_green):
+        return None
+
+    recent_high = max(k["high"] for k in klines[-11:-3])
+    bounce_high = max(klines[-2]["high"], klines[-3]["high"])
+    if bounce_high >= recent_high:
+        return None
+
+    rsi = _rsi(closes)
+    if rsi <= 50:
+        return None
+
+    avg_vol   = _avg_volume(klines)
+    vol_ratio = cur["volume"] / avg_vol if avg_vol > 0 else 0
+
+    return {
+        "symbol":     symbol,
+        "signal":     "SHORT",
+        "timeframe":  timeframe,
+        "pattern":    "📉 Bounce Failure",
+        "reason":     f"反彈未創新高即反轉\nRSI {rsi:.1f} | 量比 {vol_ratio:.1f}x",
+        "confidence": 3 if vol_ratio >= 1.5 else 2,
+    }
+
+
+# ── 主掃描函數 ────────────────────────────────────────────
+
+def scan_1h(symbol: str, klines: list) -> dict | None:
+    """1H 短線掃描：四大型態全部檢查"""
+    if not _is_valid(klines, min_len=25):
+        return None
+    for fn in [_first_green_day, _gap_and_go, _short_the_pump, _bounce_failure]:
+        result = fn(symbol, klines, "1H")
+        if result:
+            return result
     return None
 
 
-def scan_scalp(symbol: str, klines: list) -> dict | None:
-    """短線策略（1H）"""
-    if len(klines) < SCALP_BB_PERIOD + 5:
+def scan_4h(symbol: str, klines: list) -> dict | None:
+    """4H 波段掃描：First Green Day + Short the Pump"""
+    if not _is_valid(klines, min_len=25):
         return None
-
-    closes = [k["close"] for k in klines]
-    cur    = klines[-1]
-    prev   = klines[-2]
-
-    upper, _, lower = _bollinger(closes, SCALP_BB_PERIOD, SCALP_BB_STD)
-    upper_p, _, lower_p = _bollinger(closes[:-1], SCALP_BB_PERIOD, SCALP_BB_STD)
-    if upper is None or upper_p is None:
-        return None
-
-    r       = _rsi(closes)
-    avg_vol = _avg_volume(klines)
-    if avg_vol == 0:
-        return None
-    vol_ratio = cur["volume"] / avg_vol
-    vol_ok    = vol_ratio >= SCALP_VOL_MIN
-
-    # ── 多單：下軌反彈 + RSI超賣 + 量確認 + 看漲K線 ──────
-    near_lower  = cur["low"] <= lower and cur["close"] > lower
-    rsi_sold    = r < SCALP_RSI_OVERSOLD   # 放寬至 38
-    bull_candle = _is_hammer(cur) or _is_bull_engulf(prev, cur)
-
-    if near_lower and rsi_sold and vol_ok and bull_candle:
-        pattern = "錘子線" if _is_hammer(cur) else "吞噬陽線"
-        return {
-            "symbol":     symbol,
-            "signal":     "LONG",
-            "timeframe":  "1H",
-            "pattern":    f"⚡ 短線多單（{pattern}）",
-            "reason":     (
-                f"布林下軌反彈\n"
-                f"RSI {r:.1f} 超賣 | 量比 {vol_ratio:.1f}x"
-            ),
-            "confidence": 3,
-        }
-
-    # ── 空單：上軌反轉 + RSI超買 + 量確認 + 看跌K線 ──────
-    near_upper  = cur["high"] >= upper and cur["close"] < upper
-    rsi_bought  = r > SCALP_RSI_OVERBOUGHT  # 放寬至 62
-    bear_candle = _is_shooting_star(cur) or _is_bear_engulf(prev, cur)
-
-    if near_upper and rsi_bought and vol_ok and bear_candle:
-        pattern = "射擊之星" if _is_shooting_star(cur) else "吞噬陰線"
-        return {
-            "symbol":     symbol,
-            "signal":     "SHORT",
-            "timeframe":  "1H",
-            "pattern":    f"⚡ 短線空單（{pattern}）",
-            "reason":     (
-                f"布林上軌反轉\n"
-                f"RSI {r:.1f} 超買 | 量比 {vol_ratio:.1f}x"
-            ),
-            "confidence": 3,
-        }
-
+    for fn in [_first_green_day, _short_the_pump]:
+        result = fn(symbol, klines, "4H")
+        if result:
+            return result
     return None
