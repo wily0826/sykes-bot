@@ -51,12 +51,12 @@ def _can_open(timeframe: str, symbol: str) -> bool:
 
 async def _scan_once() -> None:
     for symbol in WATCHLIST:
-        # ── 1H 短線：四大型態 ─────────────────────────────
+        # ── 1H 短線 ───────────────────────────────────────
         if _can_open("1H", symbol):
             try:
                 klines = bingx.get_klines(symbol, interval="1h", limit=60)
+                logger.info(f"📊 1H {symbol} 取得 {len(klines)} 根K線")
                 if not klines:
-                    logger.warning(f"⚠️ 1H {symbol} 取得 0 根K線")
                     continue
                 sig = strategy.scan_1h(symbol, klines)
                 if sig:
@@ -65,15 +65,17 @@ async def _scan_once() -> None:
                         logger.info(f"📡 短線訊號：{key} {sig['pattern']}")
                         await tg_module.send_signal(sig)
                         _sent_signals[key] = time.time()
+                else:
+                    logger.info(f"🔍 1H {symbol} 無訊號")
             except Exception as e:
                 logger.error(f"短線掃描 {symbol} 錯誤：{e}")
 
-        # ── 4H 波段：FGD + Short the Pump ────────────────
+        # ── 4H 波段 ───────────────────────────────────────
         if _can_open("4H", symbol):
             try:
                 klines = bingx.get_klines(symbol, interval="4h", limit=60)
+                logger.info(f"📊 4H {symbol} 取得 {len(klines)} 根K線")
                 if not klines:
-                    logger.warning(f"⚠️ 4H {symbol} 取得 0 根K線")
                     continue
                 sig = strategy.scan_4h(symbol, klines)
                 if sig:
@@ -82,6 +84,8 @@ async def _scan_once() -> None:
                         logger.info(f"📡 波段訊號：{key} {sig['pattern']}")
                         await tg_module.send_signal(sig)
                         _sent_signals[key] = time.time()
+                else:
+                    logger.info(f"🔍 4H {symbol} 無訊號")
             except Exception as e:
                 logger.error(f"波段掃描 {symbol} 錯誤：{e}")
 
@@ -107,13 +111,12 @@ async def main() -> None:
         chat_id=tg_module.TELEGRAM_CHAT_ID,
         text=(
             "🚀 賽克斯策略 Bot 已上線！\n\n"
-            "🟢 First Green Day — 連跌後爆量陽線做多\n"
-            "🚀 Gap and Go — 跳空高開持續做多\n"
-            "🔴 Short the Pump — 炒作高峰做空\n"
-            "📉 Bounce Failure — 反彈失敗做空\n\n"
+            "🟢 First Green Day\n"
+            "🚀 Gap and Go\n"
+            "🔴 Short the Pump\n"
+            "📉 Bounce Failure\n\n"
             f"監控：{' / '.join(WATCHLIST)}\n"
-            "停損 5% | 停利 15% | 槓桿 3倍\n\n"
-            "輸入 /status 查看狀態"
+            "停損 5% | 停利 15% | 槓桿 3倍"
         )
     )
 
