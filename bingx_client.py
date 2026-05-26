@@ -14,14 +14,20 @@ logger   = logging.getLogger(__name__)
 
 # 各幣對最小下單量與精度（BingX 永續合約規格）
 _MIN_QTY: dict = {
-    "BTC-USDT": 0.001,
-    "ETH-USDT": 0.01,
-    "SOL-USDT": 0.1,
+    "BTC-USDT":  0.001,
+    "ETH-USDT":  0.01,
+    "SOL-USDT":  0.1,
+    "BNB-USDT":  0.01,
+    "XRP-USDT":  1.0,
+    "AVAX-USDT": 0.1,
 }
 _QTY_DECIMAL: dict = {
-    "BTC-USDT": 3,
-    "ETH-USDT": 2,
-    "SOL-USDT": 1,
+    "BTC-USDT":  3,
+    "ETH-USDT":  2,
+    "SOL-USDT":  1,
+    "BNB-USDT":  2,
+    "XRP-USDT":  0,
+    "AVAX-USDT": 1,
 }
 
 
@@ -137,6 +143,35 @@ def get_open_positions() -> set:
         }
     except Exception:
         return set()
+
+
+def get_positions_detail() -> list:
+    """取得所有持倉詳情（含浮動盈虧、進場價、現價）"""
+    try:
+        data      = _send("GET", "/openApi/swap/v2/user/positions", {})
+        positions = data.get("data", [])
+        if not isinstance(positions, list):
+            return []
+        result = []
+        for p in positions:
+            if not isinstance(p, dict):
+                continue
+            amt = float(p.get("positionAmt", 0) or 0)
+            if amt == 0:
+                continue
+            result.append({
+                "symbol":         p.get("symbol", ""),
+                "side":           p.get("positionSide", "LONG"),
+                "qty":            abs(amt),
+                "entry_price":    float(p.get("entryPrice",      0) or 0),
+                "mark_price":     float(p.get("markPrice",       0) or 0),
+                "unrealized_pnl": float(p.get("unrealizedProfit", 0) or 0),
+                "leverage":       int(float(p.get("leverage", 1) or 1)),
+            })
+        return result
+    except Exception as e:
+        logger.error(f"取得持倉詳情失敗：{e}")
+        return []
 
 
 def set_leverage(symbol: str) -> None:

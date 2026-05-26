@@ -129,17 +129,64 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def _cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from config import WATCHLIST
+    pairs = " / ".join(s.replace("-USDT", "") for s in WATCHLIST)
     await update.message.reply_text(
         "🤖 幣圈趨勢策略 Bot\n\n"
         "📈 波段策略（4H）：EMA + MACD + RSI + 量\n"
         "⚡ 短線策略（1H）：布林帶 + RSI + K線型態\n\n"
-        f"監控：BTC / ETH / SOL\n"
+        f"監控：{pairs}\n"
         f"槓桿：{LEVERAGE}倍 | 每單：{USDT_PER_TRADE} USDT\n"
         f"停損：{STOP_LOSS_PCT*100:.0f}% | 停利：{TAKE_PROFIT_PCT*100:.0f}%\n\n"
         "指令：\n"
-        "/balance — 查詢帳戶餘額\n"
-        "/status  — 查詢 Bot 狀態"
+        "/positions — 查看當前持倉與浮動盈虧\n"
+        "/balance   — 查詢帳戶可用餘額\n"
+        "/status    — 查詢 Bot 狀態"
     )
+
+
+async def _cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """查詢當前所有持倉，顯示進場價、現價與浮動盈虧"""
+    try:
+        positions = bingx.get_positions_detail()
+    except Exception as e:
+        await update.message.reply_text(f"❌ 查詢失敗：{e}")
+        return
+
+    if not positions:
+        await update.message.reply_text("📋 目前沒有持倉")
+        return
+
+    lines = [f"{'━'*22}", "📋 當前持倉", f"{'━'*22}"]
+    total_pnl = 0.0
+
+    for p in positions:
+        pnl       = p["unrealized_pnl"]
+        total_pnl += pnl
+        pnl_sign  = "+" if pnl >= 0 else ""
+        pnl_emoji = "🟢" if pnl >= 0 else "🔴"
+        side_label = "LONG  🔺" if p["side"] == "LONG" else "SHORT 🔻"
+
+        # 浮動報酬率（基於保證金）
+        margin = (p["entry_price"] * p["qty"]) / p["leverage"] if p["leverage"] > 0 else 0
+        pct    = (pnl / margin * 100) if margin > 0 else 0
+        pct_sign = "+" if pct >= 0 else ""
+
+        lines += [
+            f"\n{pnl_emoji} {p['symbol']}  {side_label}",
+            f"  數量：{p['qty']}  |  槓桿：{p['leverage']}x",
+            f"  進場：{p['entry_price']:.4f}  →  現價：{p['mark_price']:.4f}",
+            f"  浮動盈虧：{pnl_sign}{pnl:.2f} USDT（{pct_sign}{pct:.1f}%）",
+        ]
+
+    total_sign  = "+" if total_pnl >= 0 else ""
+    total_emoji = "🟢" if total_pnl >= 0 else "🔴"
+    lines += [
+        f"\n{'━'*22}",
+        f"{total_emoji} 合計浮動盈虧：{total_sign}{total_pnl:.2f} USDT",
+    ]
+
+    await update.message.reply_text("\n".join(lines))
 
 
 async def _cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -167,8 +214,9 @@ def build_app(on_order_placed=None) -> Application:
     global _app, _on_order_placed
     _on_order_placed = on_order_placed
     _app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    _app.add_handler(CommandHandler("start",   _cmd_start))
-    _app.add_handler(CommandHandler("balance", _cmd_balance))
-    _app.add_handler(CommandHandler("status",  _cmd_status))
+    _app.add_handler(CommandHandler("start",     _cmd_start))
+    _app.add_handler(CommandHandler("positions", _cmd_positions))
+    _app.add_handler(CommandHandler("balance",   _cmd_balance))
+    _app.add_handler(CommandHandler("status",    _cmd_status))
     _app.add_handler(CallbackQueryHandler(_handle_callback))
     return _app

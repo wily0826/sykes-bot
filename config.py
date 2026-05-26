@@ -20,10 +20,17 @@ MAX_SWING       = 2      # 波段單上限
 MAX_SCALP       = 1      # 短線單上限
 
 # ── 監控幣對（只選流動性最好的）──────────────────────────
-WATCHLIST = ["BTC-USDT", "ETH-USDT", "SOL-USDT"]
+WATCHLIST = [
+    "BTC-USDT",   # 比特幣
+    "ETH-USDT",   # 以太坊
+    "SOL-USDT",   # Solana
+    "BNB-USDT",   # 幣安幣
+    "XRP-USDT",   # 瑞波幣
+    "AVAX-USDT",  # Avalanche
+]
 
 # ── 掃描設定 ──────────────────────────────────────────────
-SCAN_INTERVAL_SEC  = 60
+SCAN_INTERVAL_SEC  = 90   # 6 幣 × 2 週期 = 12 次 API，間隔拉長至 90 秒
 SIGNAL_COOLDOWN    = 3600   # 同一訊號 1 小時內不重複
 
 # ── 波段策略參數（4H）────────────────────────────────────
