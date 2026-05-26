@@ -6,7 +6,7 @@
     - First Green Day  → 連跌後首根大量陽線，做多
     - Gap and Go       → 跳空高開持續上漲，做多
     - Short the Pump   → 炒作高峰反轉，做空
-    - Bounce Failure   → 反彈失敗再破低，做空
+    - Bounce Failure   → 反彈失敗再破低，做空（加強版）
 
   4H 波段：
     - First Green Day  → 同上，週期更長
@@ -15,8 +15,6 @@
 
 import statistics
 
-
-# ── 共用指標 ──────────────────────────────────────────────
 
 def _rsi(closes: list, period: int = 14) -> float:
     if len(closes) < period + 2:
@@ -37,7 +35,6 @@ def _avg_volume(klines: list, lookback: int = 20) -> float:
 
 
 def _is_valid(klines: list, min_len: int = 25) -> bool:
-    """基本資料驗證"""
     if len(klines) < min_len:
         return False
     for k in klines[-5:]:
@@ -51,11 +48,7 @@ def _is_valid(klines: list, min_len: int = 25) -> bool:
 def _first_green_day(symbol: str, klines: list, timeframe: str) -> dict | None:
     """
     First Green Day — 做多
-    條件：
-      - 前 3 根都是陰線
-      - 當根是陽線
-      - 成交量 > 均量 2 倍
-      - RSI < 65（不追高）
+    條件：前3根陰線 + 當根大量陽線（>2x）+ RSI < 65
     """
     cur    = klines[-1]
     closes = [k["close"] for k in klines]
@@ -92,11 +85,7 @@ def _first_green_day(symbol: str, klines: list, timeframe: str) -> dict | None:
 def _gap_and_go(symbol: str, klines: list, timeframe: str) -> dict | None:
     """
     Gap and Go — 做多
-    條件：
-      - 當根開盤比前根收盤高出 1% 以上（跳空）
-      - 當根是陽線（持續上漲）
-      - 成交量 > 均量 2 倍
-      - RSI < 70
+    條件：跳空 >1% + 陽線 + 爆量（>2x）+ RSI < 70
     """
     cur    = klines[-1]
     prev   = klines[-2]
@@ -134,10 +123,7 @@ def _gap_and_go(symbol: str, klines: list, timeframe: str) -> dict | None:
 def _short_the_pump(symbol: str, klines: list, timeframe: str) -> dict | None:
     """
     Short the Pump — 做空
-    條件：
-      - 前 5 根最高點比 6 根前收盤高出 5% 以上（短期大漲）
-      - 當根是陰線（反轉訊號）
-      - RSI > 65（過熱）
+    條件：近5根漲幅 >5% + 當根陰線 + RSI > 65
     """
     cur    = klines[-1]
     closes = [k["close"] for k in klines]
@@ -176,12 +162,13 @@ def _short_the_pump(symbol: str, klines: list, timeframe: str) -> dict | None:
 
 def _bounce_failure(symbol: str, klines: list, timeframe: str) -> dict | None:
     """
-    Bounce Failure — 做空
+    Bounce Failure — 做空（嚴格版）
     條件：
-      - 前 2 根有陽線（反彈）
-      - 反彈高點未超過近 10 根最高點（失敗）
-      - 當根是陰線（反轉）
-      - RSI > 50
+      - 前2根有陽線（反彈）
+      - 反彈高點未超過近10根最高點（失敗確認）
+      - 當根是陰線
+      - RSI > 55（過去版本 50 太鬆）
+      - 成交量 > 均量 1.0x（有賣壓確認）
     """
     cur    = klines[-1]
     closes = [k["close"] for k in klines]
@@ -203,11 +190,13 @@ def _bounce_failure(symbol: str, klines: list, timeframe: str) -> dict | None:
         return None
 
     rsi = _rsi(closes)
-    if rsi <= 50:
+    if rsi <= 55:  # 從 50 提高到 55，過濾弱訊號
         return None
 
     avg_vol   = _avg_volume(klines)
     vol_ratio = cur["volume"] / avg_vol if avg_vol > 0 else 0
+    if vol_ratio < 1.0:  # 新增：需要至少平均量才確認賣壓
+        return None
 
     return {
         "symbol":     symbol,
@@ -222,7 +211,6 @@ def _bounce_failure(symbol: str, klines: list, timeframe: str) -> dict | None:
 # ── 主掃描函數 ────────────────────────────────────────────
 
 def scan_1h(symbol: str, klines: list) -> dict | None:
-    """1H 短線掃描：四大型態全部檢查"""
     if not _is_valid(klines, min_len=25):
         return None
     for fn in [_first_green_day, _gap_and_go, _short_the_pump, _bounce_failure]:
@@ -233,7 +221,6 @@ def scan_1h(symbol: str, klines: list) -> dict | None:
 
 
 def scan_4h(symbol: str, klines: list) -> dict | None:
-    """4H 波段掃描：First Green Day + Short the Pump"""
     if not _is_valid(klines, min_len=25):
         return None
     for fn in [_first_green_day, _short_the_pump]:
