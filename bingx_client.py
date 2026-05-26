@@ -174,6 +174,28 @@ def get_positions_detail() -> list:
         return []
 
 
+def get_today_pnl() -> float:
+    """查詢今日已實現盈虧（UTC 00:00 至今）"""
+    try:
+        from datetime import datetime, timezone
+        now   = datetime.now(timezone.utc)
+        start = int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+        end   = int(now.timestamp() * 1000)
+        data  = _send("GET", "/openApi/swap/v2/user/income", {
+            "incomeType": "REALIZED_PNL",
+            "startTime":  start,
+            "endTime":    end,
+            "limit":      200,
+        })
+        records = data.get("data", []) or []
+        if not isinstance(records, list):
+            return 0.0
+        return sum(float(r.get("income", 0) or 0) for r in records)
+    except Exception as e:
+        logger.error(f"查詢今日盈虧失敗：{e}")
+        return 0.0
+
+
 def set_leverage(symbol: str) -> None:
     for side in ["LONG", "SHORT"]:
         try:

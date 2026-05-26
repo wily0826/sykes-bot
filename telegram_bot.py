@@ -3,8 +3,19 @@ Telegram Bot 處理器
 """
 import logging
 import time
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram import (
+    Update,
+    InlineKeyboardButton, InlineKeyboardMarkup,
+    ReplyKeyboardMarkup, KeyboardButton,
+)
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 from config import (
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
     USDT_PER_TRADE, STOP_LOSS_PCT, TAKE_PROFIT_PCT, LEVERAGE
@@ -13,24 +24,53 @@ import bingx_client as bingx
 
 logger = logging.getLogger(__name__)
 
-_pending: dict = {}
-_app: Application = None
-_on_order_placed = None  # callback(symbol, timeframe, order_id)
+_pending: dict        = {}
+_app: Application     = None
+_on_order_placed      = None   # callback(symbol, timeframe, order_id)
+_on_get_stats_cb      = None   # callback() -> dict
 
 PENDING_TTL = 900   # 待確認訊號 15 分鐘後自動過期
 
+# ── 持久選單鍵盤 ─────────────────────────────────────────
+MAIN_KB = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton("📋 持倉"), KeyboardButton("💰 餘額")],
+        [KeyboardButton("📊 狀態"), KeyboardButton("📅 日報")],
+    ],
+    resize_keyboard=True,
+    is_persistent=True,
+)
+
+# 按鈕文字 → 處理函式對應
+_MENU_MAP = {
+    "📋 持倉": "_cmd_positions",
+    "💰 餘額": "_cmd_balance",
+    "📊 狀態": "_cmd_status",
+    "📅 日報": "_cmd_report",
+}
+
+
+# ── 公開 API（供 main.py 呼叫）────────────────────────────
+
+async def send_text(text: str) -> None:
+    """推播純文字訊息（供排程日報使用）"""
+    await _app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text)
+
+
+# ── 內部工具 ──────────────────────────────────────────────
 
 def _cleanup_pending() -> None:
-    """清除超過 15 分鐘的待確認訊號，防止舊訊號被誤觸"""
     now = time.time()
     expired = [k for k, v in _pending.items() if now - v.get("ts", now) > PENDING_TTL]
     for k in expired:
         _pending.pop(k, None)
-        logger.info(f"🕐 待確認訊號已過期自動移除：{k}")
+        logger.info(f"🕐 待確認訊號已過期：{k}")
 
+
+# ── 訊號推播 ──────────────────────────────────────────────
 
 async def send_signal(signal: dict) -> None:
-    """發送訊號通知到 Telegram"""
+    """發送訊號通知到 Telegram（含確認/跳過按鈕）"""
     _cleanup_pending()
     try:
         price = bingx.get_ticker(signal["symbol"])
@@ -80,6 +120,8 @@ async def send_signal(signal: dict) -> None:
     )
 
 
+# ── Callback 處理（確認/跳過按鈕）────────────────────────
+
 async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -120,13 +162,24 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 f"訂單ID：{order_id}"
             )
         else:
-            await query.edit_message_text(
-                "⚠️ 下單失敗\n請確認帳戶餘額是否足夠"
-            )
+            await query.edit_message_text("⚠️ 下單失敗\n請確認帳戶餘額是否足夠")
     except Exception as e:
         logger.error(f"下單錯誤：{e}")
         await query.edit_message_text(f"❌ 下單錯誤：{e}")
 
+
+# ── 選單按鈕文字處理 ─────────────────────────────────────
+
+async def _handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """處理下方持久按鈕的文字點擊"""
+    text = update.message.text
+    if   text == "📋 持倉": await _cmd_positions(update, context)
+    elif text == "💰 餘額": await _cmd_balance(update, context)
+    elif text == "📊 狀態": await _cmd_status(update, context)
+    elif text == "📅 日報": await _cmd_report(update, context)
+
+
+# ── 指令處理 ──────────────────────────────────────────────
 
 async def _cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     from config import WATCHLIST
@@ -138,15 +191,13 @@ async def _cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"監控：{pairs}\n"
         f"槓桿：{LEVERAGE}倍 | 每單：{USDT_PER_TRADE} USDT\n"
         f"停損：{STOP_LOSS_PCT*100:.0f}% | 停利：{TAKE_PROFIT_PCT*100:.0f}%\n\n"
-        "指令：\n"
-        "/positions — 查看當前持倉與浮動盈虧\n"
-        "/balance   — 查詢帳戶可用餘額\n"
-        "/status    — 查詢 Bot 狀態"
+        "⬇️ 使用下方按鈕操作",
+        reply_markup=MAIN_KB,
     )
 
 
 async def _cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """查詢當前所有持倉，顯示進場價、現價與浮動盈虧"""
+    """查詢當前持倉與浮動盈虧"""
     try:
         positions = bingx.get_positions_detail()
     except Exception as e:
@@ -157,20 +208,18 @@ async def _cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("📋 目前沒有持倉")
         return
 
-    lines = [f"{'━'*22}", "📋 當前持倉", f"{'━'*22}"]
+    lines     = [f"{'━'*22}", "📋 當前持倉", f"{'━'*22}"]
     total_pnl = 0.0
 
     for p in positions:
-        pnl       = p["unrealized_pnl"]
+        pnl        = p["unrealized_pnl"]
         total_pnl += pnl
-        pnl_sign  = "+" if pnl >= 0 else ""
-        pnl_emoji = "🟢" if pnl >= 0 else "🔴"
+        pnl_sign   = "+" if pnl >= 0 else ""
+        pnl_emoji  = "🟢" if pnl >= 0 else "🔴"
         side_label = "LONG  🔺" if p["side"] == "LONG" else "SHORT 🔻"
-
-        # 浮動報酬率（基於保證金）
-        margin = (p["entry_price"] * p["qty"]) / p["leverage"] if p["leverage"] > 0 else 0
-        pct    = (pnl / margin * 100) if margin > 0 else 0
-        pct_sign = "+" if pct >= 0 else ""
+        margin     = (p["entry_price"] * p["qty"]) / p["leverage"] if p["leverage"] > 0 else 0
+        pct        = (pnl / margin * 100) if margin > 0 else 0
+        pct_sign   = "+" if pct >= 0 else ""
 
         lines += [
             f"\n{pnl_emoji} {p['symbol']}  {side_label}",
@@ -185,7 +234,6 @@ async def _cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"\n{'━'*22}",
         f"{total_emoji} 合計浮動盈虧：{total_sign}{total_pnl:.2f} USDT",
     ]
-
     await update.message.reply_text("\n".join(lines))
 
 
@@ -200,23 +248,66 @@ async def _cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def _cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     from config import WATCHLIST, SCAN_INTERVAL_SEC, MAX_OPEN_ORDERS
     _cleanup_pending()
-    pending_count = len(_pending)
     await update.message.reply_text(
         f"🟢 Bot 運行中\n\n"
         f"監控幣對：{', '.join(WATCHLIST)}\n"
         f"掃描間隔：每 {SCAN_INTERVAL_SEC} 秒\n"
         f"持倉上限：{MAX_OPEN_ORDERS} 單\n"
-        f"待確認訊號：{pending_count} 個"
+        f"待確認訊號：{len(_pending)} 個"
     )
 
 
-def build_app(on_order_placed=None) -> Application:
-    global _app, _on_order_placed
+async def _cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """手動觸發今日盈虧報告"""
+    try:
+        pnl       = bingx.get_today_pnl()
+        balance   = bingx.get_balance()
+        positions = bingx.get_positions_detail()
+        stats     = _on_get_stats_cb() if _on_get_stats_cb else {}
+
+        pnl_sign  = "+" if pnl >= 0 else ""
+        pnl_emoji = "🟢" if pnl >= 0 else "🔴"
+
+        text = "\n".join([
+            f"{'━'*22}",
+            f"📅 今日盈虧報告 — {stats.get('date', '—')}",
+            f"{'━'*22}",
+            f"{pnl_emoji} 已實現盈虧：{pnl_sign}{pnl:.2f} USDT",
+            f"{'━'*22}",
+            f"📡 訊號觸發：{stats.get('signals', 0)} 次",
+            f"✅ 確認下單：{stats.get('confirmed', 0)} 次",
+            f"📋 當前持倉：{len(positions)} 筆",
+            f"💰 可用餘額：{balance:.2f} USDT",
+            f"{'━'*22}",
+        ])
+        await update.message.reply_text(text)
+    except Exception as e:
+        await update.message.reply_text(f"❌ 查詢失敗：{e}")
+
+
+# ── 建立 App ──────────────────────────────────────────────
+
+def build_app(on_order_placed=None, on_get_stats=None) -> Application:
+    global _app, _on_order_placed, _on_get_stats_cb
     _on_order_placed = on_order_placed
+    _on_get_stats_cb = on_get_stats
+
     _app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+    # 指令處理器
     _app.add_handler(CommandHandler("start",     _cmd_start))
     _app.add_handler(CommandHandler("positions", _cmd_positions))
     _app.add_handler(CommandHandler("balance",   _cmd_balance))
     _app.add_handler(CommandHandler("status",    _cmd_status))
+    _app.add_handler(CommandHandler("report",    _cmd_report))
+
+    # 下方持久按鈕（文字訊息）— 必須在 CommandHandler 後面
+    _app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND,
+        _handle_menu_button,
+    ))
+
+    # Inline 按鈕回呼（確認/跳過）
     _app.add_handler(CallbackQueryHandler(_handle_callback))
+
     return _app
