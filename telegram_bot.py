@@ -2,6 +2,7 @@
 Telegram Bot 處理器
 """
 import logging
+import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 from config import (
@@ -16,8 +17,21 @@ _pending: dict = {}
 _app: Application = None
 _on_order_placed = None  # callback(symbol, timeframe, order_id)
 
+PENDING_TTL = 900   # 待確認訊號 15 分鐘後自動過期
+
+
+def _cleanup_pending() -> None:
+    """清除超過 15 分鐘的待確認訊號，防止舊訊號被誤觸"""
+    now = time.time()
+    expired = [k for k, v in _pending.items() if now - v.get("ts", now) > PENDING_TTL]
+    for k in expired:
+        _pending.pop(k, None)
+        logger.info(f"🕐 待確認訊號已過期自動移除：{k}")
+
+
 async def send_signal(signal: dict) -> None:
     """發送訊號通知到 Telegram"""
+    _cleanup_pending()
     try:
         price = bingx.get_ticker(signal["symbol"])
     except Exception as e:
@@ -32,7 +46,7 @@ async def send_signal(signal: dict) -> None:
         tp = round(price * (1 - TAKE_PROFIT_PCT), 6)
 
     key = f"{signal['symbol']}_{signal['signal']}_{signal['timeframe']}"
-    _pending[key] = {**signal, "price": price, "sl": sl, "tp": tp}
+    _pending[key] = {**signal, "price": price, "sl": sl, "tp": tp, "ts": time.time()}
 
     stars     = "⭐" * signal["confidence"]
     direction = "做多 LONG" if signal["signal"] == "LONG" else "做空 SHORT"
@@ -50,6 +64,7 @@ async def send_signal(signal: dict) -> None:
         f"🛑 停損：{sl}（-{STOP_LOSS_PCT*100:.0f}%）\n"
         f"🎯 停利：{tp}（+{TAKE_PROFIT_PCT*100:.0f}%）\n"
         f"💵 下單：{USDT_PER_TRADE} USDT x {LEVERAGE}倍\n"
+        f"⏰ 有效期：15 分鐘\n"
         f"{'━'*20}"
     )
 
@@ -137,6 +152,7 @@ async def _cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def _cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     from config import WATCHLIST, SCAN_INTERVAL_SEC, MAX_OPEN_ORDERS
+    _cleanup_pending()
     pending_count = len(_pending)
     await update.message.reply_text(
         f"🟢 Bot 運行中\n\n"

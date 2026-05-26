@@ -12,6 +12,18 @@ from config import BINGX_API_KEY, BINGX_API_SECRET, LEVERAGE
 BASE_URL = "https://open-api.bingx.com"
 logger   = logging.getLogger(__name__)
 
+# 各幣對最小下單量與精度（BingX 永續合約規格）
+_MIN_QTY: dict = {
+    "BTC-USDT": 0.001,
+    "ETH-USDT": 0.01,
+    "SOL-USDT": 0.1,
+}
+_QTY_DECIMAL: dict = {
+    "BTC-USDT": 3,
+    "ETH-USDT": 2,
+    "SOL-USDT": 1,
+}
+
 
 def _parse_param(params: dict) -> str:
     sorted_keys = sorted(params)
@@ -140,10 +152,18 @@ def set_leverage(symbol: str) -> None:
 def place_order(symbol: str, side: str, usdt_amount: float,
                 stop_loss_price: float, take_profit_price: float):
     """下市價單，附帶停損停利"""
-    price = get_ticker(symbol)
-    qty   = round(usdt_amount * LEVERAGE / price, 4)
+    price   = get_ticker(symbol)
+    decimal = _QTY_DECIMAL.get(symbol, 4)
+    qty     = round(usdt_amount * LEVERAGE / price, decimal)
+    min_qty = _MIN_QTY.get(symbol, 0.001)
     if qty <= 0:
         raise ValueError(f"數量異常：{qty}")
+    if qty < min_qty:
+        needed = round(min_qty * price / LEVERAGE, 2)
+        raise ValueError(
+            f"{symbol} 下單量 {qty} 低於最小限制 {min_qty}，"
+            f"至少需要 {needed} USDT 本金"
+        )
 
     set_leverage(symbol)
 

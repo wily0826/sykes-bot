@@ -17,15 +17,21 @@ import statistics
 
 
 def _rsi(closes: list, period: int = 14) -> float:
+    """Wilder 平滑 RSI（標準實作，與 TradingView 一致）
+    初始值用 SMA，之後用 Wilder EMA（α = 1/period）。
+    """
     if len(closes) < period + 2:
         return 50.0
-    gains, losses = [], []
-    for i in range(len(closes) - period, len(closes)):
-        diff = closes[i] - closes[i - 1]
-        gains.append(max(diff, 0))
-        losses.append(max(-diff, 0))
-    avg_gain = sum(gains) / period
-    avg_loss = sum(losses) / period or 1e-9
+    changes = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+    # 初始值：前 period 根的簡單平均
+    avg_gain = sum(max(c, 0) for c in changes[:period]) / period
+    avg_loss = sum(max(-c, 0) for c in changes[:period]) / period
+    # Wilder 平滑（等同 EMA α = 1/period）
+    for change in changes[period:]:
+        avg_gain = (avg_gain * (period - 1) + max(change, 0)) / period
+        avg_loss = (avg_loss * (period - 1) + max(-change, 0)) / period
+    if avg_loss == 0:
+        return 100.0
     return 100 - (100 / (1 + avg_gain / avg_loss))
 
 
