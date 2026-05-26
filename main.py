@@ -271,7 +271,8 @@ async def main() -> None:
             f"監控：{' / '.join(WATCHLIST)}\n"
             "停損 5% | 停利 15% | 槓桿 3倍\n\n"
             "⬇️ 使用下方按鈕操作 Bot"
-        )
+        ),
+        reply_markup=tg_module.MAIN_KB,   # ← 上線時就直接顯示鍵盤
     )
 
     try:
