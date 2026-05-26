@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 _sent_signals: dict = {}
 _open_orders:  dict = {}
+_startup_done: bool = False   # ← 啟動保護旗標
 
 def _on_order_placed(symbol: str, timeframe: str, order_id: str) -> None:
     _open_orders[symbol] = timeframe
@@ -50,8 +51,10 @@ def _can_open(timeframe: str, symbol: str) -> bool:
     return True
 
 async def _scan_once() -> None:
+    global _startup_done
+
     for symbol in WATCHLIST:
-        # ── 1H 短線 ───────────────────────────────────────
+        # 1H 短線
         if _can_open("1H", symbol):
             try:
                 klines = bingx.get_klines(symbol, interval="1h", limit=60)
@@ -61,16 +64,21 @@ async def _scan_once() -> None:
                 sig = strategy.scan_1h(symbol, klines)
                 if sig:
                     key = f"{symbol}_{sig['signal']}_1H"
-                    if time.time() - _sent_signals.get(key, 0) > SIGNAL_COOLDOWN:
-                        logger.info(f"📡 短線訊號：{key} {sig['pattern']}")
-                        await tg_module.send_signal(sig)
-                        _sent_signals[key] = time.time()
+                    now = time.time()
+                    last = _sent_signals.get(key, 0)
+                    if now - last > SIGNAL_COOLDOWN:
+                        if _startup_done:   # ← 啟動後第一輪不發訊號
+                            logger.info(f"📡 短線訊號：{key} {sig['pattern']}")
+                            await tg_module.send_signal(sig)
+                        _sent_signals[key] = now
+                    else:
+                        logger.info(f"🔍 1H {symbol} 無訊號")
                 else:
                     logger.info(f"🔍 1H {symbol} 無訊號")
             except Exception as e:
                 logger.error(f"短線掃描 {symbol} 錯誤：{e}")
 
-        # ── 4H 波段 ───────────────────────────────────────
+        # 4H 波段
         if _can_open("4H", symbol):
             try:
                 klines = bingx.get_klines(symbol, interval="4h", limit=60)
@@ -80,14 +88,22 @@ async def _scan_once() -> None:
                 sig = strategy.scan_4h(symbol, klines)
                 if sig:
                     key = f"{symbol}_{sig['signal']}_4H"
-                    if time.time() - _sent_signals.get(key, 0) > SIGNAL_COOLDOWN:
-                        logger.info(f"📡 波段訊號：{key} {sig['pattern']}")
-                        await tg_module.send_signal(sig)
-                        _sent_signals[key] = time.time()
+                    now = time.time()
+                    last = _sent_signals.get(key, 0)
+                    if now - last > SIGNAL_COOLDOWN:
+                        if _startup_done:
+                            logger.info(f"📡 波段訊號：{key} {sig['pattern']}")
+                            await tg_module.send_signal(sig)
+                        _sent_signals[key] = now
+                    else:
+                        logger.info(f"🔍 4H {symbol} 無訊號")
                 else:
                     logger.info(f"🔍 4H {symbol} 無訊號")
             except Exception as e:
                 logger.error(f"波段掃描 {symbol} 錯誤：{e}")
+
+    # 第一輪掃描完畢後設為啟動完成
+    _startup_done = True
 
 async def _scan_loop() -> None:
     logger.info(f"🔍 賽克斯策略掃描啟動：{', '.join(WATCHLIST)}")
