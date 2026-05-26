@@ -132,6 +132,17 @@ async def _scan_once() -> None:
     _reset_daily_stats_if_needed()
 
     for symbol in WATCHLIST:
+        # ── 資金費率（兩個週期共用，只抓一次）────────────────
+        funding_rate = 0.0
+        try:
+            loop = asyncio.get_event_loop()
+            funding_rate = await loop.run_in_executor(
+                None, bingx.get_funding_rate, symbol
+            )
+            logger.info(f"💸 {symbol} 資金費率：{funding_rate*100:.4f}%")
+        except Exception as e:
+            logger.warning(f"取得資金費率失敗 {symbol}：{e}")
+
         # 1H 短線
         if _can_open("1H", symbol):
             try:
@@ -140,6 +151,15 @@ async def _scan_once() -> None:
                 if not klines:
                     continue
                 sig = strategy.scan_1h(symbol, klines)
+                if sig:
+                    # 資金費率過濾
+                    if sig["signal"] == "LONG" and funding_rate > 0.001:
+                        logger.info(f"💸 1H {symbol} 資金費率偏高（{funding_rate*100:.4f}%），壓制 LONG 訊號")
+                        sig = None
+                    elif sig["signal"] == "SHORT" and funding_rate < -0.0005:
+                        logger.info(f"💸 1H {symbol} 資金費率偏低（{funding_rate*100:.4f}%），壓制 SHORT 訊號")
+                        sig = None
+
                 if sig:
                     key = f"{symbol}_{sig['signal']}_1H"
                     now = time.time()
@@ -166,6 +186,15 @@ async def _scan_once() -> None:
                 if not klines:
                     continue
                 sig = strategy.scan_4h(symbol, klines)
+                if sig:
+                    # 資金費率過濾
+                    if sig["signal"] == "LONG" and funding_rate > 0.001:
+                        logger.info(f"💸 4H {symbol} 資金費率偏高（{funding_rate*100:.4f}%），壓制 LONG 訊號")
+                        sig = None
+                    elif sig["signal"] == "SHORT" and funding_rate < -0.0005:
+                        logger.info(f"💸 4H {symbol} 資金費率偏低（{funding_rate*100:.4f}%），壓制 SHORT 訊號")
+                        sig = None
+
                 if sig:
                     key = f"{symbol}_{sig['signal']}_4H"
                     now = time.time()

@@ -78,12 +78,30 @@ async def send_signal(signal: dict) -> None:
         logger.error(f"取得價格失敗：{e}")
         return
 
-    if signal["signal"] == "LONG":
-        sl = round(price * (1 - STOP_LOSS_PCT), 6)
-        tp = round(price * (1 + TAKE_PROFIT_PCT), 6)
+    # ── ATR 動態停損（優先使用），否則回退到固定百分比 ──────
+    atr_sl = signal.get("atr_sl", 0)
+    if atr_sl and atr_sl > 0 and price > 0:
+        if signal["signal"] == "LONG":
+            sl = round(price - atr_sl, 6)
+            tp = round(price + atr_sl * 3, 6)   # 1:3 風報比
+        else:
+            sl = round(price + atr_sl, 6)
+            tp = round(price - atr_sl * 3, 6)
+        sl_pct = abs(price - sl) / price * 100
+        tp_pct = abs(tp - price) / price * 100
+        sl_tag = f"ATR×2"
+        tp_tag = f"ATR×6"
     else:
-        sl = round(price * (1 + STOP_LOSS_PCT), 6)
-        tp = round(price * (1 - TAKE_PROFIT_PCT), 6)
+        if signal["signal"] == "LONG":
+            sl = round(price * (1 - STOP_LOSS_PCT), 6)
+            tp = round(price * (1 + TAKE_PROFIT_PCT), 6)
+        else:
+            sl = round(price * (1 + STOP_LOSS_PCT), 6)
+            tp = round(price * (1 - TAKE_PROFIT_PCT), 6)
+        sl_pct = STOP_LOSS_PCT * 100
+        tp_pct = TAKE_PROFIT_PCT * 100
+        sl_tag = f"{sl_pct:.0f}%"
+        tp_tag = f"{tp_pct:.0f}%"
 
     key = f"{signal['symbol']}_{signal['signal']}_{signal['timeframe']}"
     _pending[key] = {**signal, "price": price, "sl": sl, "tp": tp, "ts": time.time()}
@@ -101,8 +119,8 @@ async def send_signal(signal: dict) -> None:
         f"型態：{signal['pattern']} {stars}\n\n"
         f"📊 {signal['reason']}\n\n"
         f"💰 進場價：{price}\n"
-        f"🛑 停損：{sl}（-{STOP_LOSS_PCT*100:.0f}%）\n"
-        f"🎯 停利：{tp}（+{TAKE_PROFIT_PCT*100:.0f}%）\n"
+        f"🛑 停損：{sl}（{sl_tag} / -{sl_pct:.1f}%）\n"
+        f"🎯 停利：{tp}（{tp_tag} / +{tp_pct:.1f}%）\n"
         f"💵 下單：{USDT_PER_TRADE} USDT x {LEVERAGE}倍\n"
         f"⏰ 有效期：15 分鐘\n"
         f"{'━'*20}"

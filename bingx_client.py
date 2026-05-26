@@ -196,6 +196,16 @@ def get_today_pnl() -> float:
         return 0.0
 
 
+def get_funding_rate(symbol: str) -> float:
+    """查詢當前資金費率（正值 = 多方付空方，負值 = 空方付多方）"""
+    try:
+        data = _send("GET", "/openApi/swap/v2/quote/fundingRate", {"symbol": symbol})
+        return float(data.get("data", {}).get("fundingRate", 0) or 0)
+    except Exception as e:
+        logger.warning(f"查詢資金費率失敗 {symbol}：{e}")
+        return 0.0
+
+
 def set_leverage(symbol: str) -> None:
     for side in ["LONG", "SHORT"]:
         try:
