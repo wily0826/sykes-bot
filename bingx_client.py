@@ -1,12 +1,6 @@
 """
 BingX API 客戶端
-簽名方式完全參照 BingX 官方 Python 範例：
-  1. 將 params 按 key 排序後拼成 query string（不 URL encode）
-  2. 對 query string 做 HMAC-SHA256 產生簽名
-  3. 把完整 URL（含 query string 和 signature）直接傳給 requests
-  4. body 保持空白
-
-這樣 requests 不會對 query string 做任何二次 encode，確保 BingX 驗簽成功。
+簽名方式完全參照 BingX 官方 Python 範例
 """
 import hmac
 import hashlib
@@ -20,16 +14,11 @@ logger   = logging.getLogger(__name__)
 
 
 def _parse_param(params: dict) -> str:
-    """
-    將 params 按 key 排序後拼成 query string。
-    完全照搬 BingX 官方 praseParam 函數邏輯。
-    """
     sorted_keys = sorted(params)
     return "&".join(f"{k}={params[k]}" for k in sorted_keys)
 
 
 def _get_sign(payload: str) -> str:
-    """對 query string 做 HMAC-SHA256 簽名。"""
     return hmac.new(
         BINGX_API_SECRET.encode("utf-8"),
         payload.encode("utf-8"),
@@ -42,14 +31,6 @@ def _headers() -> dict:
 
 
 def _send(method: str, path: str, params: dict) -> dict:
-    """
-    通用請求函數：
-    - 加入 timestamp
-    - 產生 query string
-    - 簽名
-    - 組合完整 URL
-    - 送出請求（body 為空）
-    """
     params = dict(params)
     params["timestamp"] = int(time.time() * 1000)
     query_string = _parse_param(params)
@@ -59,7 +40,7 @@ def _send(method: str, path: str, params: dict) -> dict:
     response = requests.request(
         method, url,
         headers=_headers(),
-        data={},          # body 保持空白
+        data={},
         timeout=10,
     )
     data = response.json()
@@ -73,7 +54,6 @@ def _send(method: str, path: str, params: dict) -> dict:
 
 
 def get_klines(symbol: str, interval: str = "1h", limit: int = 100) -> list:
-    """取得 K 線資料"""
     data = _send("GET", "/openApi/swap/v3/quote/klines", {
         "symbol": symbol, "interval": interval, "limit": limit,
     })
@@ -102,13 +82,11 @@ def get_klines(symbol: str, interval: str = "1h", limit: int = 100) -> list:
 
 
 def get_ticker(symbol: str) -> float:
-    """取得最新成交價"""
     data = _send("GET", "/openApi/swap/v2/quote/ticker", {"symbol": symbol})
     return float(data["data"]["lastPrice"])
 
 
 def get_balance() -> float:
-    """取得永續 U 本位帳戶可用 USDT"""
     try:
         data  = _send("GET", "/openApi/swap/v2/user/balance", {})
         inner = data.get("data", {})
@@ -136,7 +114,6 @@ def get_balance() -> float:
 
 
 def get_open_positions() -> set:
-    """取得目前有持倉的幣對集合"""
     try:
         data      = _send("GET", "/openApi/swap/v2/user/positions", {})
         positions = data.get("data", [])
@@ -151,7 +128,6 @@ def get_open_positions() -> set:
 
 
 def set_leverage(symbol: str) -> None:
-    """多空兩邊都設定槓桿"""
     for side in ["LONG", "SHORT"]:
         try:
             _send("POST", "/openApi/swap/v2/trade/leverage", {
@@ -171,14 +147,15 @@ def place_order(symbol: str, side: str, usdt_amount: float,
 
     set_leverage(symbol)
 
+    # ✅ 修正：stopLoss type 用 STOP_MARKET，takeProfit type 用 TAKE_PROFIT_MARKET
     params = {
         "symbol":       symbol,
         "side":         "BUY" if side == "LONG" else "SELL",
         "positionSide": side,
         "type":         "MARKET",
         "quantity":     qty,
-        "stopLoss":     f'{{"type":"MARK_PRICE","stopPrice":{stop_loss_price},"workingType":"MARK_PRICE"}}',
-        "takeProfit":   f'{{"type":"MARK_PRICE","stopPrice":{take_profit_price},"workingType":"MARK_PRICE"}}',
+        "stopLoss":     f'{{"type":"STOP_MARKET","stopPrice":{stop_loss_price},"workingType":"MARK_PRICE"}}',
+        "takeProfit":   f'{{"type":"TAKE_PROFIT_MARKET","stopPrice":{take_profit_price},"workingType":"MARK_PRICE"}}',
     }
     data  = _send("POST", "/openApi/swap/v2/trade/order", params)
     order = data.get("data", {}).get("order", {})
