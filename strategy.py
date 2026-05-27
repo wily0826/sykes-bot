@@ -99,19 +99,19 @@ def _first_green_day(symbol: str, klines: list, timeframe: str) -> dict | None:
     if cur["close"] <= cur["open"]:
         return None
 
-    # ③ 前 3 根連續陰線
-    if not all(klines[-i]["close"] < klines[-i]["open"] for i in range(2, 5)):
+    # ③ 前 2 根連續陰線（放寬：原本要求 3 根）
+    if not all(klines[-i]["close"] < klines[-i]["open"] for i in range(2, 4)):
         return None
 
-    # ④ 爆量確認
+    # ④ 量能確認（放寬：1.5x，原本 2.0x）
     avg_vol   = _avg_volume(klines)
     vol_ratio = cur["volume"] / avg_vol if avg_vol > 0 else 0
-    if vol_ratio < 2.0:
+    if vol_ratio < 1.5:
         return None
 
-    # ⑤ RSI 未超買
+    # ⑤ RSI 未超買（放寬：68，原本 65）
     rsi = _rsi(closes)
-    if rsi >= 65:
+    if rsi >= 68:
         return None
 
     atr = _atr(klines)
@@ -157,21 +157,21 @@ def _consolidation_breakout(symbol: str, klines: list, timeframe: str) -> dict |
         return None
     range_pct = (consol_high - consol_low) / consol_low
 
-    # ③ 區間夠窄才算整理（< 4%）
-    if range_pct > 0.04:
+    # ③ 區間夠窄才算整理（放寬：< 6%，原本 4%）
+    if range_pct > 0.06:
         return None
 
     # ④ 當根突破並收在上方（必須是陽線）
     if cur["close"] <= consol_high or cur["close"] <= cur["open"]:
         return None
 
-    # ⑤ 爆量確認
+    # ⑤ 量能確認（放寬：1.5x，原本 2.0x）
     avg_vol   = _avg_volume(klines)
     vol_ratio = cur["volume"] / avg_vol if avg_vol > 0 else 0
-    if vol_ratio < 2.0:
+    if vol_ratio < 1.5:
         return None
 
-    # ⑥ RSI 未超買
+    # ⑥ RSI 未超買（維持 70）
     rsi = _rsi(closes)
     if rsi >= 70:
         return None
@@ -219,11 +219,11 @@ def _short_the_pump(symbol: str, klines: list, timeframe: str) -> dict | None:
 
     rally_high = max(k["high"] for k in klines[-6:-1])
     rally_pct  = (rally_high - base_price) / base_price
-    if rally_pct < 0.05:
+    if rally_pct < 0.035:   # 放寬：3.5%，原本 5%
         return None
 
     rsi = _rsi(closes)
-    if rsi <= 65:
+    if rsi <= 62:   # 放寬：62，原本 65
         return None
 
     avg_vol   = _avg_volume(klines)
@@ -278,12 +278,12 @@ def _bounce_failure(symbol: str, klines: list, timeframe: str) -> dict | None:
         return None
 
     rsi = _rsi(closes)
-    if rsi <= 55:
+    if rsi <= 50:   # 放寬：50，原本 55
         return None
 
     avg_vol   = _avg_volume(klines)
     vol_ratio = cur["volume"] / avg_vol if avg_vol > 0 else 0
-    if vol_ratio < 1.0:
+    if vol_ratio < 0.8:   # 放寬：0.8x，原本 1.0x
         return None
 
     atr = _atr(klines)

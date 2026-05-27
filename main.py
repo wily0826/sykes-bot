@@ -5,7 +5,10 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+# 台灣時區 UTC+8（Railway 伺服器跑 UTC，需明確指定）
+TZ_TAIPEI = timezone(timedelta(hours=8))
 
 from config import (
     WATCHLIST, SCAN_INTERVAL_SEC, SIGNAL_COOLDOWN,
@@ -32,7 +35,7 @@ STATE_FILE = "state.json"
 # ── 日期工具 ───────────────────────────────────────────────
 
 def _today() -> str:
-    return datetime.now().strftime("%Y-%m-%d")
+    return datetime.now(TZ_TAIPEI).strftime("%Y-%m-%d")
 
 
 def _reset_daily_stats_if_needed() -> None:
@@ -257,16 +260,16 @@ async def _send_daily_report() -> None:
 
 
 async def _daily_report_loop() -> None:
-    """每天 DAILY_REPORT_HOUR 點自動推播日報"""
+    """每天 DAILY_REPORT_HOUR 點（台灣時間）自動推播日報"""
     while True:
-        now    = datetime.now()
+        now    = datetime.now(TZ_TAIPEI)
         target = now.replace(hour=DAILY_REPORT_HOUR, minute=0, second=0, microsecond=0)
         if now >= target:
             target += timedelta(days=1)
         wait = (target - now).total_seconds()
         logger.info(
             f"📅 日報排程：{wait/3600:.1f} 小時後推播"
-            f"（{target.strftime('%m/%d %H:%M')}）"
+            f"（台灣時間 {target.strftime('%m/%d %H:%M')}）"
         )
         await asyncio.sleep(wait)
         await _send_daily_report()
