@@ -6,17 +6,26 @@
   2. 區間突破        — 取代 Gap and Go（加密市場適用）
   3. ATR 動態停損    — 根據波動自動計算停損距離（2x ATR）
   4. 資金費率過濾    — 在 main.py 執行，strategy 只負責技術面
+  5. 15M 短線掃描    — 更細粒度掃描，訊號不再只出現在整點
 
-四大型態：
-  1H 短線：
-    - First Green Day   → 連跌後首根大量陽線（EMA50 多頭才做多）
-    - 區間突破          → 窄幅整理後向上突破（EMA50 多頭才做多）
-    - Short the Pump    → 炒作高峰反轉（EMA50 空頭才做空）
-    - Bounce Failure    → 反彈失敗再破低（EMA50 空頭才做空）
+五大掃描週期：
+  15M 即時短線：
+    - First Green Day   → 連跌後首根大量陽線（EMA50 多頭）
+    - 區間突破          → 窄幅整理後向上突破（EMA50 多頭）
+    - Short the Pump    → 炒作高峰反轉（EMA50 空頭）
+    - Bounce Failure    → 反彈失敗再破低（EMA50 空頭）
+
+  1H 短線：（同四型態，參數更寬鬆）
 
   4H 波段：
     - First Green Day   → 同上，週期更長
     - Short the Pump    → 同上，週期更長
+
+各週期參數差異：
+  週期   FGD連跌  FGD量比  整理幅度  STP漲幅  BF_RSI
+  15M    3 根     2.0x    <2.5%    2.0%    >52
+  1H     2 根     1.5x    <6.0%    3.5%    >50
+  4H     2 根     1.5x    —        3.5%    —
 """
 
 import statistics
@@ -79,13 +88,19 @@ def _is_valid(klines: list, min_len: int = 30) -> bool:
 
 # ── 型態一：First Green Day ───────────────────────────────
 
-def _first_green_day(symbol: str, klines: list, timeframe: str) -> dict | None:
+def _first_green_day(
+    symbol: str, klines: list, timeframe: str,
+    *,
+    consec_reds: int   = 2,    # 需要幾根連跌（15M 用 3，1H/4H 用 2）
+    vol_min:     float = 1.5,  # 最小量比（15M 用 2.0，1H/4H 用 1.5）
+    rsi_max:     float = 68,   # RSI 上限（15M 用 65，1H/4H 用 68）
+) -> dict | None:
     """
     First Green Day — 做多
     條件：
       - 在 EMA50 上方（多頭趨勢）
-      - 前 3 根陰線 + 當根大量陽線（> 2x 均量）
-      - RSI < 65（未超買）
+      - 前 N 根連跌 + 當根量能陽線
+      - RSI 未超買
     """
     closes = [k["close"] for k in klines]
     cur    = klines[-1]
@@ -99,19 +114,21 @@ def _first_green_day(symbol: str, klines: list, timeframe: str) -> dict | None:
     if cur["close"] <= cur["open"]:
         return None
 
-    # ③ 前 2 根連續陰線（放寬：原本要求 3 根）
-    if not all(klines[-i]["close"] < klines[-i]["open"] for i in range(2, 4)):
+    # ③ 前 N 根連續陰線
+    if len(klines) < consec_reds + 2:
+        return None
+    if not all(klines[-i]["close"] < klines[-i]["open"] for i in range(2, consec_reds + 2)):
         return None
 
-    # ④ 量能確認（放寬：1.5x，原本 2.0x）
+    # ④ 量能確認
     avg_vol   = _avg_volume(klines)
     vol_ratio = cur["volume"] / avg_vol if avg_vol > 0 else 0
-    if vol_ratio < 1.5:
+    if vol_ratio < vol_min:
         return None
 
-    # ⑤ RSI 未超買（放寬：68，原本 65）
+    # ⑤ RSI 未超買
     rsi = _rsi(closes)
-    if rsi >= 68:
+    if rsi >= rsi_max:
         return None
 
     atr = _atr(klines)
@@ -128,15 +145,19 @@ def _first_green_day(symbol: str, klines: list, timeframe: str) -> dict | None:
 
 # ── 型態二：區間突破（取代 Gap and Go）───────────────────
 
-def _consolidation_breakout(symbol: str, klines: list, timeframe: str) -> dict | None:
+def _consolidation_breakout(
+    symbol: str, klines: list, timeframe: str,
+    *,
+    max_range_pct: float = 0.06,   # 最大整理幅度（15M 用 0.025，1H 用 0.06）
+    vol_min:       float = 1.5,    # 最小量比（15M 用 2.0，1H 用 1.5）
+) -> dict | None:
     """
     區間突破 — 做多（加密貨幣適用）
     條件：
       - 在 EMA50 上方（多頭趨勢）
-      - 前 10 根在窄幅區間震盪（高低差 < 4%）
-      - 當根向上突破區間高點，收盤站穩突破位
-      - 成交量 > 2x 均量（量能確認）
-      - RSI < 70（未超買）
+      - 前 10 根窄幅震盪（幅度 < max_range_pct）
+      - 當根向上突破，收盤站穩
+      - 量能確認 + RSI < 70
     """
     if len(klines) < 15:
         return None
@@ -150,28 +171,28 @@ def _consolidation_breakout(symbol: str, klines: list, timeframe: str) -> dict |
     if not ema50 or closes[-1] <= ema50[-1]:
         return None
 
-    # ② 計算前 10 根的震盪區間
+    # ② 計算前 10 根震盪區間
     consol_high = max(k["high"] for k in lookback)
     consol_low  = min(k["low"]  for k in lookback)
     if consol_low <= 0:
         return None
     range_pct = (consol_high - consol_low) / consol_low
 
-    # ③ 區間夠窄才算整理（放寬：< 6%，原本 4%）
-    if range_pct > 0.06:
+    # ③ 區間夠窄
+    if range_pct > max_range_pct:
         return None
 
     # ④ 當根突破並收在上方（必須是陽線）
     if cur["close"] <= consol_high or cur["close"] <= cur["open"]:
         return None
 
-    # ⑤ 量能確認（放寬：1.5x，原本 2.0x）
+    # ⑤ 量能確認
     avg_vol   = _avg_volume(klines)
     vol_ratio = cur["volume"] / avg_vol if avg_vol > 0 else 0
-    if vol_ratio < 1.5:
+    if vol_ratio < vol_min:
         return None
 
-    # ⑥ RSI 未超買（維持 70）
+    # ⑥ RSI 未超買
     rsi = _rsi(closes)
     if rsi >= 70:
         return None
@@ -190,14 +211,19 @@ def _consolidation_breakout(symbol: str, klines: list, timeframe: str) -> dict |
 
 # ── 型態三：Short the Pump ───────────────────────────────
 
-def _short_the_pump(symbol: str, klines: list, timeframe: str) -> dict | None:
+def _short_the_pump(
+    symbol: str, klines: list, timeframe: str,
+    *,
+    min_rally_pct: float = 0.035,  # 最小漲幅門檻（15M 用 0.02，1H/4H 用 0.035）
+    rsi_min:       float = 62,     # RSI 下限（15M 用 60，1H/4H 用 62）
+) -> dict | None:
     """
     Short the Pump — 做空
     條件：
       - 在 EMA50 下方（空頭趨勢）
-      - 近 5 根急漲 > 5%
+      - 近 5 根急漲 > min_rally_pct
       - 當根陰線反轉
-      - RSI > 65（過熱）
+      - RSI > rsi_min（過熱）
     """
     closes = [k["close"] for k in klines]
     cur    = klines[-1]
@@ -219,11 +245,11 @@ def _short_the_pump(symbol: str, klines: list, timeframe: str) -> dict | None:
 
     rally_high = max(k["high"] for k in klines[-6:-1])
     rally_pct  = (rally_high - base_price) / base_price
-    if rally_pct < 0.035:   # 放寬：3.5%，原本 5%
+    if rally_pct < min_rally_pct:
         return None
 
     rsi = _rsi(closes)
-    if rsi <= 62:   # 放寬：62，原本 65
+    if rsi <= rsi_min:
         return None
 
     avg_vol   = _avg_volume(klines)
@@ -243,15 +269,20 @@ def _short_the_pump(symbol: str, klines: list, timeframe: str) -> dict | None:
 
 # ── 型態四：Bounce Failure ───────────────────────────────
 
-def _bounce_failure(symbol: str, klines: list, timeframe: str) -> dict | None:
+def _bounce_failure(
+    symbol: str, klines: list, timeframe: str,
+    *,
+    rsi_min: float = 50,   # RSI 下限（15M 用 52，1H 用 50）
+    vol_min: float = 0.8,  # 最小量比
+) -> dict | None:
     """
-    Bounce Failure — 做空（嚴格版）
+    Bounce Failure — 做空
     條件：
       - 在 EMA50 下方（空頭趨勢）
       - 前 2 根有陽線（反彈），但反彈高點未創新高
       - 當根陰線確認失敗
-      - RSI > 55（仍偏高）
-      - 成交量 > 均量（賣壓確認）
+      - RSI > rsi_min（仍偏高）
+      - 成交量達門檻（賣壓確認）
     """
     closes = [k["close"] for k in klines]
     cur    = klines[-1]
@@ -278,12 +309,12 @@ def _bounce_failure(symbol: str, klines: list, timeframe: str) -> dict | None:
         return None
 
     rsi = _rsi(closes)
-    if rsi <= 50:   # 放寬：50，原本 55
+    if rsi <= rsi_min:
         return None
 
     avg_vol   = _avg_volume(klines)
     vol_ratio = cur["volume"] / avg_vol if avg_vol > 0 else 0
-    if vol_ratio < 0.8:   # 放寬：0.8x，原本 1.0x
+    if vol_ratio < vol_min:
         return None
 
     atr = _atr(klines)
@@ -300,22 +331,60 @@ def _bounce_failure(symbol: str, klines: list, timeframe: str) -> dict | None:
 
 # ── 主掃描函數 ────────────────────────────────────────────
 
-def scan_1h(symbol: str, klines: list) -> dict | None:
+def scan_15m(symbol: str, klines: list) -> dict | None:
+    """
+    15 分鐘即時掃描 — 4 型態，條件比 1H 嚴格（避免 15m 雜訊過多）
+    FGD: 連跌 3 根，量比 2.0x，RSI < 65
+    CB : 整理幅度 < 2.5%，量比 2.0x
+    STP: 漲幅 > 2.0%，RSI > 60
+    BF : RSI > 52
+    """
     if not _is_valid(klines, min_len=30):
         return None
-    for fn in [_first_green_day, _consolidation_breakout,
-               _short_the_pump, _bounce_failure]:
-        result = fn(symbol, klines, "1H")
+    checks = [
+        (_first_green_day,        {"consec_reds": 3, "vol_min": 2.0, "rsi_max": 65}),
+        (_consolidation_breakout, {"max_range_pct": 0.025, "vol_min": 2.0}),
+        (_short_the_pump,         {"min_rally_pct": 0.02,  "rsi_min": 60}),
+        (_bounce_failure,         {"rsi_min": 52, "vol_min": 0.8}),
+    ]
+    for fn, kw in checks:
+        result = fn(symbol, klines, "15M", **kw)
+        if result:
+            return result
+    return None
+
+
+def scan_1h(symbol: str, klines: list) -> dict | None:
+    """
+    1H 短線掃描 — 4 型態（條件比 15M 寬鬆，比 4H 細）
+    """
+    if not _is_valid(klines, min_len=30):
+        return None
+    checks = [
+        (_first_green_day,        {"consec_reds": 2, "vol_min": 1.5, "rsi_max": 68}),
+        (_consolidation_breakout, {"max_range_pct": 0.06, "vol_min": 1.5}),
+        (_short_the_pump,         {"min_rally_pct": 0.035, "rsi_min": 62}),
+        (_bounce_failure,         {"rsi_min": 50, "vol_min": 0.8}),
+    ]
+    for fn, kw in checks:
+        result = fn(symbol, klines, "1H", **kw)
         if result:
             return result
     return None
 
 
 def scan_4h(symbol: str, klines: list) -> dict | None:
+    """
+    4H 波段掃描 — 2 型態
+    """
     if not _is_valid(klines, min_len=30):
         return None
-    for fn in [_first_green_day, _short_the_pump]:
-        result = fn(symbol, klines, "4H")
+    checks = [
+        (_first_green_day, {"consec_reds": 2, "vol_min": 1.5, "rsi_max": 68}),
+        (_short_the_pump,  {"min_rally_pct": 0.035, "rsi_min": 62}),
+    ]
+    for fn, kw in checks:
+        result = fn(symbol, klines, "4H", **kw)
         if result:
             return result
     return None

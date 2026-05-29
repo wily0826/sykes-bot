@@ -15,9 +15,9 @@ USDT_PER_TRADE  = 20     # 每筆下單金額 (USDT)
 LEVERAGE        = 3      # 槓桿倍數（3倍風險可控）
 STOP_LOSS_PCT   = 0.05   # 停損 5%（含槓桿實際虧損 15%）
 TAKE_PROFIT_PCT = 0.15   # 停利 15%（含槓桿實際獲利 45%）
-MAX_OPEN_ORDERS = 3      # 最多同時持倉數
-MAX_SWING       = 2      # 波段單上限
-MAX_SCALP       = 1      # 短線單上限
+MAX_OPEN_ORDERS = 4      # 最多同時持倉數（含 15M 後上調）
+MAX_SWING       = 2      # 波段單上限（4H）
+MAX_SCALP       = 2      # 短線單上限（1H + 15M 合計）
 
 # ── 監控幣對（只選流動性最好的）──────────────────────────
 WATCHLIST = [
@@ -30,8 +30,12 @@ WATCHLIST = [
 ]
 
 # ── 掃描設定 ──────────────────────────────────────────────
-SCAN_INTERVAL_SEC  = 90   # 6 幣 × 2 週期 = 12 次 API，間隔拉長至 90 秒
-SIGNAL_COOLDOWN    = 3600   # 同一訊號 1 小時內不重複
+SCAN_INTERVAL_SEC  = 90    # 6 幣 × 3 週期 = 18 次 API，間隔 90 秒
+
+# 各時間框架訊號冷卻（避免同一型態在同一根 K 線重複發送）
+SIGNAL_COOLDOWN_15M = 1800   # 15M：30 分鐘（= 2 根 K 線）
+SIGNAL_COOLDOWN_1H  = 7200   # 1H ：2 小時（不會每整點重複）
+SIGNAL_COOLDOWN_4H  = 14400  # 4H ：4 小時（= 1 根 K 線）
 
 # ── 每日報告設定 ───────────────────────────────────────────
 DAILY_REPORT_HOUR  = 8    # 每天幾點推播日報（24小時制，本地時間）

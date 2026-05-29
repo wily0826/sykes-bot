@@ -11,9 +11,17 @@ from datetime import datetime, timedelta, timezone
 TZ_TAIPEI = timezone(timedelta(hours=8))
 
 from config import (
-    WATCHLIST, SCAN_INTERVAL_SEC, SIGNAL_COOLDOWN,
+    WATCHLIST, SCAN_INTERVAL_SEC,
+    SIGNAL_COOLDOWN_15M, SIGNAL_COOLDOWN_1H, SIGNAL_COOLDOWN_4H,
     MAX_OPEN_ORDERS, MAX_SWING, MAX_SCALP, DAILY_REPORT_HOUR
 )
+
+# 各時間框架冷卻秒數對照表
+_COOLDOWN = {
+    "15M": SIGNAL_COOLDOWN_15M,
+    "1H":  SIGNAL_COOLDOWN_1H,
+    "4H":  SIGNAL_COOLDOWN_4H,
+}
 import bingx_client as bingx
 import strategy
 import telegram_bot as tg_module
@@ -106,10 +114,10 @@ def _can_open(timeframe: str, symbol: str) -> bool:
         return False
     total  = len(_open_orders)
     swings = sum(1 for tf in _open_orders.values() if tf == "4H")
-    scalps = sum(1 for tf in _open_orders.values() if tf == "1H")
+    scalps = sum(1 for tf in _open_orders.values() if tf in ("1H", "15M"))
     if total  >= MAX_OPEN_ORDERS: return False
     if timeframe == "4H" and swings >= MAX_SWING: return False
-    if timeframe == "1H" and scalps >= MAX_SCALP: return False
+    if timeframe in ("1H", "15M") and scalps >= MAX_SCALP: return False
     return True
 
 
@@ -146,38 +154,52 @@ async def _scan_once() -> None:
         except Exception as e:
             logger.warning(f"取得資金費率失敗 {symbol}：{e}")
 
+        # ── 共用：資金費率過濾輔助函式 ─────────────────────────
+        def _funding_suppressed(direction: str) -> bool:
+            if direction == "LONG"  and funding_rate > 0.001:
+                logger.info(f"💸 {symbol} 資金費率偏高（{funding_rate*100:.4f}%），壓制 LONG")
+                return True
+            if direction == "SHORT" and funding_rate < -0.0005:
+                logger.info(f"💸 {symbol} 資金費率偏低（{funding_rate*100:.4f}%），壓制 SHORT")
+                return True
+            return False
+
+        # ── 共用：發送訊號輔助函式 ─────────────────────────────
+        async def _maybe_send(sig: dict | None, label: str) -> None:
+            if not sig or _funding_suppressed(sig["signal"]):
+                logger.info(f"🔍 {label} {symbol} 無訊號")
+                return
+            key      = f"{symbol}_{sig['signal']}_{sig['timeframe']}"
+            now      = time.time()
+            last     = _sent_signals.get(key, 0)
+            cooldown = _COOLDOWN.get(sig["timeframe"], SIGNAL_COOLDOWN_1H)
+            if now - last > cooldown:
+                if _startup_done:
+                    logger.info(f"📡 {label} 訊號：{key} {sig['pattern']}")
+                    await tg_module.send_signal(sig)
+                    _daily_stats["signals"] = _daily_stats.get("signals", 0) + 1
+                _sent_signals[key] = now
+                _save_state()
+            else:
+                logger.info(f"🔇 {label} {symbol} 訊號冷卻中（剩餘 {(last+cooldown-now)/60:.0f} 分）")
+
+        # 15M 即時短線
+        if _can_open("15M", symbol):
+            try:
+                klines = bingx.get_klines(symbol, interval="15m", limit=60)
+                logger.info(f"📊 15M {symbol} 取得 {len(klines)} 根K線")
+                if klines:
+                    await _maybe_send(strategy.scan_15m(symbol, klines), "15M")
+            except Exception as e:
+                logger.error(f"15M 掃描 {symbol} 錯誤：{e}")
+
         # 1H 短線
         if _can_open("1H", symbol):
             try:
                 klines = bingx.get_klines(symbol, interval="1h", limit=60)
                 logger.info(f"📊 1H {symbol} 取得 {len(klines)} 根K線")
-                if not klines:
-                    continue
-                sig = strategy.scan_1h(symbol, klines)
-                if sig:
-                    # 資金費率過濾
-                    if sig["signal"] == "LONG" and funding_rate > 0.001:
-                        logger.info(f"💸 1H {symbol} 資金費率偏高（{funding_rate*100:.4f}%），壓制 LONG 訊號")
-                        sig = None
-                    elif sig["signal"] == "SHORT" and funding_rate < -0.0005:
-                        logger.info(f"💸 1H {symbol} 資金費率偏低（{funding_rate*100:.4f}%），壓制 SHORT 訊號")
-                        sig = None
-
-                if sig:
-                    key = f"{symbol}_{sig['signal']}_1H"
-                    now = time.time()
-                    last = _sent_signals.get(key, 0)
-                    if now - last > SIGNAL_COOLDOWN:
-                        if _startup_done:
-                            logger.info(f"📡 短線訊號：{key} {sig['pattern']}")
-                            await tg_module.send_signal(sig)
-                            _daily_stats["signals"] = _daily_stats.get("signals", 0) + 1
-                        _sent_signals[key] = now
-                        _save_state()
-                    else:
-                        logger.info(f"🔇 1H {symbol} 訊號冷卻中：{key}")
-                else:
-                    logger.info(f"🔍 1H {symbol} 無訊號")
+                if klines:
+                    await _maybe_send(strategy.scan_1h(symbol, klines), "1H")
             except Exception as e:
                 logger.error(f"短線掃描 {symbol} 錯誤：{e}")
 
@@ -186,33 +208,8 @@ async def _scan_once() -> None:
             try:
                 klines = bingx.get_klines(symbol, interval="4h", limit=60)
                 logger.info(f"📊 4H {symbol} 取得 {len(klines)} 根K線")
-                if not klines:
-                    continue
-                sig = strategy.scan_4h(symbol, klines)
-                if sig:
-                    # 資金費率過濾
-                    if sig["signal"] == "LONG" and funding_rate > 0.001:
-                        logger.info(f"💸 4H {symbol} 資金費率偏高（{funding_rate*100:.4f}%），壓制 LONG 訊號")
-                        sig = None
-                    elif sig["signal"] == "SHORT" and funding_rate < -0.0005:
-                        logger.info(f"💸 4H {symbol} 資金費率偏低（{funding_rate*100:.4f}%），壓制 SHORT 訊號")
-                        sig = None
-
-                if sig:
-                    key = f"{symbol}_{sig['signal']}_4H"
-                    now = time.time()
-                    last = _sent_signals.get(key, 0)
-                    if now - last > SIGNAL_COOLDOWN:
-                        if _startup_done:
-                            logger.info(f"📡 波段訊號：{key} {sig['pattern']}")
-                            await tg_module.send_signal(sig)
-                            _daily_stats["signals"] = _daily_stats.get("signals", 0) + 1
-                        _sent_signals[key] = now
-                        _save_state()
-                    else:
-                        logger.info(f"🔇 4H {symbol} 訊號冷卻中：{key}")
-                else:
-                    logger.info(f"🔍 4H {symbol} 無訊號")
+                if klines:
+                    await _maybe_send(strategy.scan_4h(symbol, klines), "4H")
             except Exception as e:
                 logger.error(f"波段掃描 {symbol} 錯誤：{e}")
 
@@ -296,12 +293,15 @@ async def main() -> None:
         chat_id=tg_module.TELEGRAM_CHAT_ID,
         text=(
             "🚀 賽克斯策略 Bot 已上線！\n\n"
-            "🟢 First Green Day\n"
-            "🚀 Gap and Go\n"
-            "🔴 Short the Pump\n"
-            "📉 Bounce Failure\n\n"
-            f"監控：{' / '.join(WATCHLIST)}\n"
-            "停損 5% | 停利 15% | 槓桿 3倍\n\n"
+            "📐 型態：\n"
+            "  🟢 First Green Day\n"
+            "  💥 區間突破\n"
+            "  🔴 Short the Pump\n"
+            "  📉 Bounce Failure\n\n"
+            "⏱ 週期：15M / 1H / 4H\n"
+            f"👁 監控：{' / '.join(WATCHLIST)}\n"
+            "🛡 EMA50 趨勢過濾 + 資金費率過濾\n"
+            "📏 ATR 動態停損（2x ATR）\n\n"
             "⬇️ 使用下方按鈕操作 Bot"
         ),
         reply_markup=tg_module.MAIN_KB,   # ← 上線時就直接顯示鍵盤
