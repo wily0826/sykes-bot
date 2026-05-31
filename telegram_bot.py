@@ -57,6 +57,20 @@ async def send_text(text: str) -> None:
     await _app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text)
 
 
+async def send_close_alert(symbol: str, side: str, qty: float, text: str) -> None:
+    """推播持倉健康警示，附「立即平倉」按鈕"""
+    key = f"closepos:{symbol}:{side}:{qty}"
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔴 立即平倉", callback_data=key),
+        InlineKeyboardButton("⏭ 忽略",     callback_data=f"ignorealert:{symbol}"),
+    ]])
+    await _app.bot.send_message(
+        chat_id=TELEGRAM_CHAT_ID,
+        text=text,
+        reply_markup=keyboard,
+    )
+
+
 # ── 內部工具 ──────────────────────────────────────────────
 
 def _cleanup_pending() -> None:
@@ -138,15 +152,48 @@ async def send_signal(signal: dict) -> None:
     )
 
 
-# ── Callback 處理（確認/跳過按鈕）────────────────────────
+# ── Callback 處理（確認/跳過/平倉按鈕）─────────────────
 
 async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
 
+    data   = query.data
+    parts  = data.split(":", 1)
+    action = parts[0]
+
+    # ── 忽略持倉警示 ─────────────────────────────────────
+    if action == "ignorealert":
+        await query.edit_message_text("⏭ 已忽略此次警示")
+        return
+
+    # ── 立即平倉（來自持倉健康警示）────────────────────────
+    if action == "closepos":
+        # callback_data 格式：closepos:BTC-USDT:LONG:0.001
+        try:
+            _, symbol, side, qty_str = data.split(":")
+            qty = float(qty_str)
+        except ValueError:
+            await query.edit_message_text("❌ 平倉參數解析錯誤")
+            return
+        await query.edit_message_text(f"⏳ 正在平倉 {symbol} {side}...")
+        try:
+            ok = bingx.close_position(symbol, side, qty)
+            if ok:
+                await query.edit_message_text(
+                    f"✅ 平倉成功！\n幣對：{symbol}\n方向：{side}\n數量：{qty}"
+                )
+            else:
+                await query.edit_message_text("⚠️ 平倉失敗，請至交易所手動確認")
+        except Exception as e:
+            logger.error(f"平倉錯誤：{e}")
+            await query.edit_message_text(f"❌ 平倉錯誤：{e}")
+        return
+
+    # ── 確認 / 跳過訊號（原有邏輯）──────────────────────────
     try:
-        action, key = query.data.split(":", 1)
-    except ValueError:
+        key = parts[1]
+    except IndexError:
         return
 
     signal = _pending.pop(key, None)
@@ -160,6 +207,19 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
+    # ── 下單前先查餘額 ────────────────────────────────────
+    try:
+        balance = bingx.get_balance()
+        if balance < USDT_PER_TRADE:
+            await query.edit_message_text(
+                f"⚠️ 餘額不足，無法下單\n"
+                f"可用：{balance:.2f} USDT | 需要：{USDT_PER_TRADE} USDT\n"
+                f"請先入金或減少持倉後重試"
+            )
+            return
+    except Exception as e:
+        logger.warning(f"查詢餘額失敗（繼續嘗試下單）：{e}")
+
     await query.edit_message_text(f"⏳ 正在下單 {signal['symbol']}...")
     try:
         order_id = bingx.place_order(
@@ -171,7 +231,10 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         if order_id:
             if _on_order_placed:
-                _on_order_placed(signal["symbol"], signal["timeframe"], order_id)
+                _on_order_placed(
+                    signal["symbol"], signal["timeframe"],
+                    order_id, signal.get("signal", "LONG"),
+                )
             await query.edit_message_text(
                 f"✅ 下單成功！\n"
                 f"幣對：{signal['symbol']}\n"

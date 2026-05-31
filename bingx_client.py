@@ -206,6 +206,31 @@ def get_funding_rate(symbol: str) -> float:
         return 0.0
 
 
+def close_position(symbol: str, side: str, qty: float) -> bool:
+    """
+    市價全部平倉
+    side = 'LONG' 平多單 / 'SHORT' 平空單
+    qty  = 目前持倉數量（由 get_positions_detail 取得）
+    """
+    close_side = "SELL" if side == "LONG" else "BUY"
+    decimal    = _QTY_DECIMAL.get(symbol, 4)
+    params = {
+        "symbol":       symbol,
+        "side":         close_side,
+        "positionSide": side,
+        "type":         "MARKET",
+        "quantity":     round(qty, decimal),
+        "reduceOnly":   "true",
+    }
+    try:
+        data  = _send("POST", "/openApi/swap/v2/trade/order", params)
+        order = data.get("data", {}).get("order", {})
+        return bool(order.get("orderId"))
+    except Exception as e:
+        logger.error(f"平倉失敗 {symbol} {side}：{e}")
+        return False
+
+
 def set_leverage(symbol: str) -> None:
     for side in ["LONG", "SHORT"]:
         try:

@@ -13,7 +13,8 @@ TZ_TAIPEI = timezone(timedelta(hours=8))
 from config import (
     WATCHLIST, SCAN_INTERVAL_SEC,
     SIGNAL_COOLDOWN_15M, SIGNAL_COOLDOWN_1H, SIGNAL_COOLDOWN_4H,
-    MAX_OPEN_ORDERS, MAX_SWING, MAX_SCALP, DAILY_REPORT_HOUR
+    MAX_OPEN_ORDERS, MAX_SWING, MAX_SCALP, DAILY_REPORT_HOUR,
+    MONITOR_INTERVAL_SEC, MAX_HOLD_HOURS, PROFIT_ALERT_PCT, ALERT_COOLDOWN,
 )
 
 # 各時間框架冷卻秒數對照表
@@ -33,11 +34,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 _sent_signals: dict = {}
-_open_orders:  dict = {}
+_open_orders:  dict = {}   # {symbol: {"tf": "1H", "ts": epoch, "side": "LONG"}}
 _startup_done: bool = False
 _daily_stats:  dict = {}   # {"date": "YYYY-MM-DD", "signals": 0, "confirmed": 0}
+_alert_sent:   dict = {}   # {symbol: epoch}  — 持倉警示去重
 
 STATE_FILE = "state.json"
+
+
+def _get_tf(entry) -> str:
+    """相容舊格式（字串）與新格式（dict）的 timeframe 取值"""
+    return entry.get("tf") if isinstance(entry, dict) else entry
 
 
 # ── 日期工具 ───────────────────────────────────────────────
@@ -100,21 +107,21 @@ def _get_daily_stats() -> dict:
 
 # ── 持倉管理 ───────────────────────────────────────────────
 
-def _on_order_placed(symbol: str, timeframe: str, order_id: str) -> None:
+def _on_order_placed(symbol: str, timeframe: str, order_id: str, side: str = "LONG") -> None:
     """下單成功後更新持倉狀態 + 今日確認計數"""
-    _open_orders[symbol] = timeframe
+    _open_orders[symbol] = {"tf": timeframe, "ts": time.time(), "side": side}
     _reset_daily_stats_if_needed()
     _daily_stats["confirmed"] = _daily_stats.get("confirmed", 0) + 1
     _save_state()
-    logger.info(f"📋 持倉新增：{symbol} ({timeframe})")
+    logger.info(f"📋 持倉新增：{symbol} ({timeframe} {side})")
 
 
 def _can_open(timeframe: str, symbol: str) -> bool:
     if symbol in _open_orders:
         return False
     total  = len(_open_orders)
-    swings = sum(1 for tf in _open_orders.values() if tf == "4H")
-    scalps = sum(1 for tf in _open_orders.values() if tf in ("1H", "15M"))
+    swings = sum(1 for v in _open_orders.values() if _get_tf(v) == "4H")
+    scalps = sum(1 for v in _open_orders.values() if _get_tf(v) in ("1H", "15M"))
     if total  >= MAX_OPEN_ORDERS: return False
     if timeframe == "4H" and swings >= MAX_SWING: return False
     if timeframe in ("1H", "15M") and scalps >= MAX_SCALP: return False
@@ -224,6 +231,76 @@ async def _scan_loop() -> None:
         await asyncio.sleep(SCAN_INTERVAL_SEC)
 
 
+# ── 持倉監控 ───────────────────────────────────────────────
+
+async def _check_position_health() -> None:
+    """
+    每 15 分鐘檢查所有持倉是否仍在合理範圍：
+      1. 持倉超過各週期上限 → 推「持倉過久」警示
+      2. 浮動盈利 > PROFIT_ALERT_PCT → 推「建議止盈」警示
+    每個持倉同一警示最多每 4 小時發一次。
+    """
+    try:
+        loop      = asyncio.get_event_loop()
+        positions = await loop.run_in_executor(None, bingx.get_positions_detail)
+    except Exception as e:
+        logger.warning(f"持倉監控取得資料失敗：{e}")
+        return
+
+    now = time.time()
+    for p in positions:
+        symbol = p["symbol"]
+        entry  = _open_orders.get(symbol, {})
+        tf     = _get_tf(entry) or "1H"
+        entry_ts = entry.get("ts", 0) if isinstance(entry, dict) else 0
+
+        hold_h    = (now - entry_ts) / 3600 if entry_ts else 0
+        margin    = (p["entry_price"] * p["qty"]) / p["leverage"] if p["leverage"] > 0 else 1
+        pnl_pct   = p["unrealized_pnl"] / margin if margin > 0 else 0
+        max_hold  = MAX_HOLD_HOURS.get(tf, 24)
+
+        # 判斷是否需要警示
+        reasons = []
+        if entry_ts and hold_h > max_hold:
+            reasons.append(f"⏰ 已持倉 {hold_h:.1f} 小時（{tf} 建議上限 {max_hold}h）")
+        if pnl_pct > PROFIT_ALERT_PCT:
+            pnl_sign = "+" if p["unrealized_pnl"] >= 0 else ""
+            reasons.append(
+                f"🎯 浮盈 {pnl_pct*100:.1f}%"
+                f"（{pnl_sign}{p['unrealized_pnl']:.2f} USDT）已達止盈建議"
+            )
+
+        if not reasons:
+            continue
+
+        # 去重：同一持倉 4 小時內不重複推
+        last_alert = _alert_sent.get(symbol, 0)
+        if now - last_alert < ALERT_COOLDOWN:
+            continue
+
+        _alert_sent[symbol] = now
+        side_label = "LONG 🔺" if p["side"] == "LONG" else "SHORT 🔻"
+        text = (
+            f"{'━'*20}\n"
+            f"⚠️ 持倉健康提醒 — {symbol}\n"
+            f"{'━'*20}\n"
+            f"方向：{side_label} | 週期：{tf}\n"
+            f"進場：{p['entry_price']:.4f}  現價：{p['mark_price']:.4f}\n\n"
+            + "\n".join(reasons) +
+            f"\n{'━'*20}"
+        )
+        await tg_module.send_close_alert(symbol, p["side"], p["qty"], text)
+        logger.info(f"⚠️ 持倉警示：{symbol} ({', '.join(reasons[:1])})")
+
+
+async def _monitor_positions_loop() -> None:
+    """每 MONITOR_INTERVAL_SEC 秒執行一次持倉健康檢查"""
+    logger.info("🔍 持倉監控啟動")
+    while True:
+        await asyncio.sleep(MONITOR_INTERVAL_SEC)
+        await _check_position_health()
+
+
 # ── 每日報告 ───────────────────────────────────────────────
 
 async def _send_daily_report() -> None:
@@ -308,9 +385,10 @@ async def main() -> None:
     )
 
     try:
-        # 掃描迴圈 + 日報排程同時執行
+        # 掃描迴圈 + 持倉監控 + 日報排程同時執行
         await asyncio.gather(
             _scan_loop(),
+            _monitor_positions_loop(),
             _daily_report_loop(),
         )
     finally:
