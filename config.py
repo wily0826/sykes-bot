@@ -34,6 +34,7 @@ SCAN_INTERVAL_SEC  = 60    # 6 幣 × 3 週期 ≈ 24 次 API/分鐘，每分鐘
 
 # 各時間框架訊號冷卻（避免同一型態在同一根 K 線重複發送）
 SIGNAL_COOLDOWN_15M = 1800   # 15M：30 分鐘（= 2 根 K 線）
+SIGNAL_COOLDOWN_30M = 3600   # 30M：1 小時（= 2 根 K 線）
 SIGNAL_COOLDOWN_1H  = 7200   # 1H ：2 小時（不會每整點重複）
 SIGNAL_COOLDOWN_4H  = 14400  # 4H ：4 小時（= 1 根 K 線）
 
@@ -44,6 +45,7 @@ DAILY_REPORT_HOUR  = 8    # 每天幾點推播日報（24小時制，本地時�
 MONITOR_INTERVAL_SEC = 900   # 持倉健康檢查間隔（15 分鐘）
 MAX_HOLD_HOURS = {           # 各週期最長合理持倉時間
     "15M": 4,
+    "30M": 12,
     "1H":  24,
     "4H":  72,
 }

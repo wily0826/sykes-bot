@@ -354,6 +354,29 @@ def scan_15m(symbol: str, klines: list) -> dict | None:
     return None
 
 
+def scan_30m(symbol: str, klines: list) -> dict | None:
+    """
+    30 分鐘掃描 — 4 型態，條件介於 15M（嚴）與 1H（寬）之間
+    FGD: 連跌 2 根，量比 1.8x，RSI < 66
+    CB : 整理幅度 < 4.0%，量比 1.8x
+    STP: 漲幅 > 2.5%，RSI > 61
+    BF : RSI > 51
+    """
+    if not _is_valid(klines, min_len=30):
+        return None
+    checks = [
+        (_first_green_day,        {"consec_reds": 2, "vol_min": 1.8, "rsi_max": 66}),
+        (_consolidation_breakout, {"max_range_pct": 0.04, "vol_min": 1.8}),
+        (_short_the_pump,         {"min_rally_pct": 0.025, "rsi_min": 61}),
+        (_bounce_failure,         {"rsi_min": 51, "vol_min": 0.8}),
+    ]
+    for fn, kw in checks:
+        result = fn(symbol, klines, "30M", **kw)
+        if result:
+            return result
+    return None
+
+
 def scan_1h(symbol: str, klines: list) -> dict | None:
     """
     1H 短線掃描 — 4 型態（條件比 15M 寬鬆，比 4H 細）

@@ -12,7 +12,7 @@ TZ_TAIPEI = timezone(timedelta(hours=8))
 
 from config import (
     WATCHLIST, SCAN_INTERVAL_SEC,
-    SIGNAL_COOLDOWN_15M, SIGNAL_COOLDOWN_1H, SIGNAL_COOLDOWN_4H,
+    SIGNAL_COOLDOWN_15M, SIGNAL_COOLDOWN_30M, SIGNAL_COOLDOWN_1H, SIGNAL_COOLDOWN_4H,
     MAX_OPEN_ORDERS, MAX_SWING, MAX_SCALP, DAILY_REPORT_HOUR,
     MONITOR_INTERVAL_SEC, MAX_HOLD_HOURS, PROFIT_ALERT_PCT, ALERT_COOLDOWN,
 )
@@ -20,6 +20,7 @@ from config import (
 # 各時間框架冷卻秒數對照表
 _COOLDOWN = {
     "15M": SIGNAL_COOLDOWN_15M,
+    "30M": SIGNAL_COOLDOWN_30M,
     "1H":  SIGNAL_COOLDOWN_1H,
     "4H":  SIGNAL_COOLDOWN_4H,
 }
@@ -121,10 +122,10 @@ def _can_open(timeframe: str, symbol: str) -> bool:
         return False
     total  = len(_open_orders)
     swings = sum(1 for v in _open_orders.values() if _get_tf(v) == "4H")
-    scalps = sum(1 for v in _open_orders.values() if _get_tf(v) in ("1H", "15M"))
+    scalps = sum(1 for v in _open_orders.values() if _get_tf(v) in ("15M", "30M", "1H"))
     if total  >= MAX_OPEN_ORDERS: return False
     if timeframe == "4H" and swings >= MAX_SWING: return False
-    if timeframe in ("1H", "15M") and scalps >= MAX_SCALP: return False
+    if timeframe in ("15M", "30M", "1H") and scalps >= MAX_SCALP: return False
     return True
 
 
@@ -199,6 +200,16 @@ async def _scan_once() -> None:
                     await _maybe_send(strategy.scan_15m(symbol, klines), "15M")
             except Exception as e:
                 logger.error(f"15M 掃描 {symbol} 錯誤：{e}")
+
+        # 30M 短線
+        if _can_open("30M", symbol):
+            try:
+                klines = bingx.get_klines(symbol, interval="30m", limit=60)
+                logger.info(f"📊 30M {symbol} 取得 {len(klines)} 根K線")
+                if klines:
+                    await _maybe_send(strategy.scan_30m(symbol, klines), "30M")
+            except Exception as e:
+                logger.error(f"30M 掃描 {symbol} 錯誤：{e}")
 
         # 1H 短線
         if _can_open("1H", symbol):
