@@ -231,33 +231,36 @@ def close_position(symbol: str, side: str, qty: float) -> bool:
         return False
 
 
-def set_leverage(symbol: str) -> None:
+def set_leverage(symbol: str, leverage: int = None) -> None:
+    lev = leverage if leverage is not None else LEVERAGE
     for side in ["LONG", "SHORT"]:
         try:
             _send("POST", "/openApi/swap/v2/trade/leverage", {
-                "symbol": symbol, "side": side, "leverage": LEVERAGE,
+                "symbol": symbol, "side": side, "leverage": lev,
             })
         except Exception as e:
             logger.warning(f"設定槓桿失敗 {symbol} {side}：{e}")
 
 
 def place_order(symbol: str, side: str, usdt_amount: float,
-                stop_loss_price: float, take_profit_price: float):
-    """下市價單，附帶停損停利"""
+                stop_loss_price: float, take_profit_price: float,
+                leverage: int = None):
+    """下市價單，附帶停損停利（leverage 預設讀 config.LEVERAGE）"""
+    lev     = leverage if leverage is not None else LEVERAGE
     price   = get_ticker(symbol)
     decimal = _QTY_DECIMAL.get(symbol, 4)
-    qty     = round(usdt_amount * LEVERAGE / price, decimal)
+    qty     = round(usdt_amount * lev / price, decimal)
     min_qty = _MIN_QTY.get(symbol, 0.001)
     if qty <= 0:
         raise ValueError(f"數量異常：{qty}")
     if qty < min_qty:
-        needed = round(min_qty * price / LEVERAGE, 2)
+        needed = round(min_qty * price / lev, 2)
         raise ValueError(
             f"{symbol} 下單量 {qty} 低於最小限制 {min_qty}，"
             f"至少需要 {needed} USDT 本金"
         )
 
-    set_leverage(symbol)
+    set_leverage(symbol, lev)
 
     # ✅ 修正：stopLoss type 用 STOP_MARKET，takeProfit type 用 TAKE_PROFIT_MARKET
     params = {

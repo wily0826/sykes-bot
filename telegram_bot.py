@@ -18,7 +18,8 @@ from telegram.ext import (
 )
 from config import (
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
-    USDT_PER_TRADE, STOP_LOSS_PCT, TAKE_PROFIT_PCT, LEVERAGE
+    USDT_PER_TRADE, STOP_LOSS_PCT, TAKE_PROFIT_PCT, LEVERAGE,
+    QUALITY_CONFIG,
 )
 import bingx_client as bingx
 
@@ -84,7 +85,7 @@ def _cleanup_pending() -> None:
 # ── 訊號推播 ──────────────────────────────────────────────
 
 async def send_signal(signal: dict) -> None:
-    """發送訊號通知到 Telegram（含確認/跳過按鈕）"""
+    """發送訊號通知到 Telegram（含品質分級、確認/跳過按鈕）"""
     _cleanup_pending()
     try:
         price = bingx.get_ticker(signal["symbol"])
@@ -92,20 +93,27 @@ async def send_signal(signal: dict) -> None:
         logger.error(f"取得價格失敗：{e}")
         return
 
-    # ── ATR 動態停損（優先使用），否則回退到固定百分比 ──────
-    atr_sl = signal.get("atr_sl", 0)
-    if atr_sl and atr_sl > 0 and price > 0:
+    # ── 品質分級設定 ───────────────────────────────────────
+    quality = signal.get("quality", "A")
+    qconf   = QUALITY_CONFIG.get(quality, QUALITY_CONFIG["A"])
+    atr     = signal.get("atr", signal.get("atr_sl", 0) / 2)   # 向後相容
+
+    # ── 根據品質計算 SL / TP ───────────────────────────────
+    if atr and atr > 0 and price > 0:
+        sl_dist = atr * qconf["sl_atr"]
+        tp_dist = sl_dist * qconf["tp_rr"]
         if signal["signal"] == "LONG":
-            sl = round(price - atr_sl, 6)
-            tp = round(price + atr_sl * 3, 6)   # 1:3 風報比
+            sl = round(price - sl_dist, 6)
+            tp = round(price + tp_dist, 6)
         else:
-            sl = round(price + atr_sl, 6)
-            tp = round(price - atr_sl * 3, 6)
-        sl_pct = abs(price - sl) / price * 100
-        tp_pct = abs(tp - price) / price * 100
-        sl_tag = f"ATR×2"
-        tp_tag = f"ATR×6"
+            sl = round(price + sl_dist, 6)
+            tp = round(price - tp_dist, 6)
+        sl_pct = sl_dist / price * 100
+        tp_pct = tp_dist / price * 100
+        sl_tag = f"ATR×{qconf['sl_atr']}"
+        tp_tag = f"1:{qconf['tp_rr']} RR"
     else:
+        # fallback：固定百分比
         if signal["signal"] == "LONG":
             sl = round(price * (1 - STOP_LOSS_PCT), 6)
             tp = round(price * (1 + TAKE_PROFIT_PCT), 6)
@@ -118,26 +126,33 @@ async def send_signal(signal: dict) -> None:
         tp_tag = f"{tp_pct:.0f}%"
 
     key = f"{signal['symbol']}_{signal['signal']}_{signal['timeframe']}"
-    _pending[key] = {**signal, "price": price, "sl": sl, "tp": tp, "ts": time.time()}
+    _pending[key] = {
+        **signal, "price": price, "sl": sl, "tp": tp, "ts": time.time(),
+        "usdt": qconf["usdt"], "leverage": qconf["leverage"],
+    }
 
-    stars     = "⭐" * signal["confidence"]
-    direction = "做多 LONG" if signal["signal"] == "LONG" else "做空 SHORT"
-    tf_label  = "波段(4H)" if signal["timeframe"] == "4H" else "短線(1H)"
+    # ── 品質標籤 ───────────────────────────────────────────
+    quality_badge = {"S": "🏆 S 級", "A+": "⭐ A+ 級", "A": "📊 A 級"}.get(quality, "📊 A 級")
+    tf_map = {"15M": "即時(15M)", "30M": "短線(30M)", "1H": "短線(1H)", "4H": "波段(4H)"}
+    tf_label  = tf_map.get(signal["timeframe"], signal["timeframe"])
+    direction = "做多 LONG 🔺" if signal["signal"] == "LONG" else "做空 SHORT 🔻"
 
     text = (
-        f"{'━'*20}\n"
-        f"📡 訊號觸發 — {tf_label}\n"
-        f"{'━'*20}\n"
+        f"{'━'*22}\n"
+        f"📡 {tf_label} 訊號觸發\n"
+        f"{'━'*22}\n"
         f"幣對：{signal['symbol']}\n"
         f"方向：{direction}\n"
-        f"型態：{signal['pattern']} {stars}\n\n"
+        f"型態：{signal['pattern']}\n"
+        f"品質：{quality_badge}\n"
+        f"  └ {signal.get('q_reason', '')}\n\n"
         f"📊 {signal['reason']}\n\n"
         f"💰 進場價：{price}\n"
-        f"🛑 停損：{sl}（{sl_tag} / -{sl_pct:.1f}%）\n"
-        f"🎯 停利：{tp}（{tp_tag} / +{tp_pct:.1f}%）\n"
-        f"💵 下單：{USDT_PER_TRADE} USDT x {LEVERAGE}倍\n"
+        f"🛑 停損：{sl}  ({sl_tag} / -{sl_pct:.1f}%)\n"
+        f"🎯 停利：{tp}  ({tp_tag} / +{tp_pct:.1f}%)\n"
+        f"💵 下單：{qconf['usdt']} USDT × {qconf['leverage']}倍\n"
         f"⏰ 有效期：15 分鐘\n"
-        f"{'━'*20}"
+        f"{'━'*22}"
     )
 
     keyboard = InlineKeyboardMarkup([[
@@ -210,24 +225,31 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     # ── 下單前先查餘額 ────────────────────────────────────
     try:
         balance = bingx.get_balance()
-        if balance < USDT_PER_TRADE:
+        usdt_need = signal.get("usdt", USDT_PER_TRADE)
+        if balance < usdt_need:
             await query.edit_message_text(
                 f"⚠️ 餘額不足，無法下單\n"
-                f"可用：{balance:.2f} USDT | 需要：{USDT_PER_TRADE} USDT\n"
+                f"可用：{balance:.2f} USDT | 需要：{usdt_need} USDT\n"
                 f"請先入金或減少持倉後重試"
             )
             return
     except Exception as e:
         logger.warning(f"查詢餘額失敗（繼續嘗試下單）：{e}")
 
-    await query.edit_message_text(f"⏳ 正在下單 {signal['symbol']}...")
+    order_usdt = signal.get("usdt", USDT_PER_TRADE)
+    order_lev  = signal.get("leverage", LEVERAGE)
+    quality    = signal.get("quality", "A")
+    await query.edit_message_text(
+        f"⏳ 正在下單 {signal['symbol']}（{quality} 級｜{order_usdt} USDT × {order_lev}倍）..."
+    )
     try:
         order_id = bingx.place_order(
             symbol=signal["symbol"],
             side=signal["signal"],
-            usdt_amount=USDT_PER_TRADE,
+            usdt_amount=order_usdt,
             stop_loss_price=signal["sl"],
             take_profit_price=signal["tp"],
+            leverage=order_lev,
         )
         if order_id:
             if _on_order_placed:
@@ -239,7 +261,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 f"✅ 下單成功！\n"
                 f"幣對：{signal['symbol']}\n"
                 f"方向：{signal['signal']}\n"
-                f"週期：{signal['timeframe']}\n"
+                f"品質：{quality} 級\n"
+                f"下單：{order_usdt} USDT × {order_lev}倍\n"
                 f"訂單ID：{order_id}"
             )
         else:

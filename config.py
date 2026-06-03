@@ -52,6 +52,17 @@ MAX_HOLD_HOURS = {           # 各週期最長合理持倉時間
 PROFIT_ALERT_PCT = 0.08      # 浮動盈利 > 8%（相對本金）→ 建議止盈
 ALERT_COOLDOWN   = 14400     # 同一持倉警示最多每 4 小時推一次
 
+# ── 訊號品質分級 ────────────────────────────────────────────
+#   sl_atr : 停損距離 = ATR × sl_atr
+#   tp_rr  : 止盈距離 = SL距離 × tp_rr（R:R 風報比）
+#   usdt   : 每筆下單金額
+#   leverage: 槓桿倍數
+QUALITY_CONFIG = {
+    "S":  {"usdt": 20, "leverage": 3, "sl_atr": 1.5, "tp_rr": 4},  # 1:4 RR
+    "A+": {"usdt": 15, "leverage": 3, "sl_atr": 2.0, "tp_rr": 3},  # 1:3 RR
+    "A":  {"usdt": 10, "leverage": 2, "sl_atr": 2.0, "tp_rr": 2},  # 1:2 RR
+}
+
 # ── 波段策略參數（4H）────────────────────────────────────
 SWING_EMA_FAST       = 20
 SWING_EMA_SLOW       = 50
