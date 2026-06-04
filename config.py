@@ -63,6 +63,11 @@ QUALITY_CONFIG = {
     "A":  {"usdt": 10, "leverage": 2, "sl_atr": 2.0, "tp_rr": 2},  # 1:2 RR
 }
 
+# ── 部分止盈設定（Hades Ultra 啟發）────────────────────────────────
+PARTIAL_CLOSE_AT_TP1 = True    # 達到 TP1 時自動平倉 50%
+TP1_CLOSE_PCT        = 0.5     # TP1 平倉比例（50%）
+TP1_MONITOR_SEC      = 60      # TP1 監控間隔（秒）
+
 # ── 波段策略參數（4H）────────────────────────────────────
 SWING_EMA_FAST       = 20
 SWING_EMA_SLOW       = 50

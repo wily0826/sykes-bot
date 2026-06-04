@@ -98,36 +98,44 @@ async def send_signal(signal: dict) -> None:
     qconf   = QUALITY_CONFIG.get(quality, QUALITY_CONFIG["A"])
     atr     = signal.get("atr", signal.get("atr_sl", 0) / 2)   # 向後相容
 
-    # ── 根據品質計算 SL / TP ───────────────────────────────
+    # ── 根據品質計算 SL / TP1 / TP2 ──────────────────────────
     if atr and atr > 0 and price > 0:
         sl_dist = atr * qconf["sl_atr"]
         tp_dist = sl_dist * qconf["tp_rr"]
         if signal["signal"] == "LONG":
-            sl = round(price - sl_dist, 6)
-            tp = round(price + tp_dist, 6)
+            sl  = round(price - sl_dist, 6)
+            tp  = round(price + tp_dist, 6)
+            tp1 = round(price + sl_dist, 6)   # 1:1 RR 部分止盈點
         else:
-            sl = round(price + sl_dist, 6)
-            tp = round(price - tp_dist, 6)
-        sl_pct = sl_dist / price * 100
-        tp_pct = tp_dist / price * 100
-        sl_tag = f"ATR×{qconf['sl_atr']}"
-        tp_tag = f"1:{qconf['tp_rr']} RR"
+            sl  = round(price + sl_dist, 6)
+            tp  = round(price - tp_dist, 6)
+            tp1 = round(price - sl_dist, 6)   # 1:1 RR 部分止盈點
+        sl_pct  = sl_dist / price * 100
+        tp_pct  = tp_dist / price * 100
+        tp1_pct = sl_dist / price * 100       # = sl_pct（1:1 RR）
+        sl_tag  = f"ATR×{qconf['sl_atr']}"
+        tp_tag  = f"1:{qconf['tp_rr']} RR"
     else:
         # fallback：固定百分比
         if signal["signal"] == "LONG":
-            sl = round(price * (1 - STOP_LOSS_PCT), 6)
-            tp = round(price * (1 + TAKE_PROFIT_PCT), 6)
+            sl  = round(price * (1 - STOP_LOSS_PCT), 6)
+            tp  = round(price * (1 + TAKE_PROFIT_PCT), 6)
+            tp1 = round(price * (1 + STOP_LOSS_PCT), 6)   # 1:1 RR
         else:
-            sl = round(price * (1 + STOP_LOSS_PCT), 6)
-            tp = round(price * (1 - TAKE_PROFIT_PCT), 6)
-        sl_pct = STOP_LOSS_PCT * 100
-        tp_pct = TAKE_PROFIT_PCT * 100
-        sl_tag = f"{sl_pct:.0f}%"
-        tp_tag = f"{tp_pct:.0f}%"
+            sl  = round(price * (1 + STOP_LOSS_PCT), 6)
+            tp  = round(price * (1 - TAKE_PROFIT_PCT), 6)
+            tp1 = round(price * (1 - STOP_LOSS_PCT), 6)   # 1:1 RR
+        sl_pct  = STOP_LOSS_PCT * 100
+        tp_pct  = TAKE_PROFIT_PCT * 100
+        tp1_pct = STOP_LOSS_PCT * 100
+        sl_tag  = f"{sl_pct:.0f}%"
+        tp_tag  = f"{tp_pct:.0f}%"
 
     key = f"{signal['symbol']}_{signal['signal']}_{signal['timeframe']}"
     _pending[key] = {
-        **signal, "price": price, "sl": sl, "tp": tp, "ts": time.time(),
+        **signal, "price": price,
+        "sl": sl, "tp": tp, "tp1": tp1,
+        "ts": time.time(),
         "usdt": qconf["usdt"], "leverage": qconf["leverage"],
     }
 
@@ -148,8 +156,9 @@ async def send_signal(signal: dict) -> None:
         f"  └ {signal.get('q_reason', '')}\n\n"
         f"📊 {signal['reason']}\n\n"
         f"💰 進場價：{price}\n"
-        f"🛑 停損：{sl}  ({sl_tag} / -{sl_pct:.1f}%)\n"
-        f"🎯 停利：{tp}  ({tp_tag} / +{tp_pct:.1f}%)\n"
+        f"🛑 停損(SL)  ：{sl}  ({sl_tag} / -{sl_pct:.1f}%)\n"
+        f"🥇 TP1 50%平：{tp1}  (1:1 RR / +{tp1_pct:.1f}%) → 移至保本\n"
+        f"🎯 TP2 全額 ：{tp}  ({tp_tag} / +{tp_pct:.1f}%)\n"
         f"💵 下單：{qconf['usdt']} USDT × {qconf['leverage']}倍\n"
         f"⏰ 有效期：15 分鐘\n"
         f"{'━'*22}"
@@ -253,9 +262,15 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         if order_id:
             if _on_order_placed:
+                # 計算近似下單數量（供 TP1 監控用，以確認時價格為準）
+                decimal    = bingx.get_qty_decimal(signal["symbol"])
+                approx_qty = round(order_usdt * order_lev / signal["price"], decimal)
                 _on_order_placed(
                     signal["symbol"], signal["timeframe"],
                     order_id, signal.get("signal", "LONG"),
+                    entry_price = signal["price"],
+                    tp1         = signal.get("tp1"),
+                    qty         = approx_qty,
                 )
             await query.edit_message_text(
                 f"✅ 下單成功！\n"

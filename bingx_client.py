@@ -242,6 +242,43 @@ def set_leverage(symbol: str, leverage: int = None) -> None:
             logger.warning(f"設定槓桿失敗 {symbol} {side}：{e}")
 
 
+def get_qty_decimal(symbol: str) -> int:
+    """取得幣對數量精度（供外部模組計算近似下單量）"""
+    return _QTY_DECIMAL.get(symbol, 4)
+
+
+def place_breakeven_stop(symbol: str, side: str, qty: float, stop_price: float) -> bool:
+    """
+    在進場價設定保本停損（TP1 觸發後保護剩餘倉位）
+
+    side       = 'LONG' or 'SHORT'
+    qty        = 剩餘倉位數量（約為原始量的 50%）
+    stop_price = 進場價（保本點）
+    """
+    close_side = "SELL" if side == "LONG" else "BUY"
+    decimal    = _QTY_DECIMAL.get(symbol, 4)
+    params = {
+        "symbol":       symbol,
+        "side":         close_side,
+        "positionSide": side,
+        "type":         "STOP_MARKET",
+        "stopPrice":    round(stop_price, 6),
+        "quantity":     round(qty, decimal),
+        "reduceOnly":   "true",
+        "workingType":  "MARK_PRICE",
+    }
+    try:
+        data  = _send("POST", "/openApi/swap/v2/trade/order", params)
+        order = data.get("data", {}).get("order", {})
+        ok    = bool(order.get("orderId"))
+        if ok:
+            logger.info(f"✅ 保本停損設定成功 {symbol} {side} @ {stop_price}")
+        return ok
+    except Exception as e:
+        logger.error(f"保本停損設定失敗 {symbol} {side}：{e}")
+        return False
+
+
 def place_order(symbol: str, side: str, usdt_amount: float,
                 stop_loss_price: float, take_profit_price: float,
                 leverage: int = None):

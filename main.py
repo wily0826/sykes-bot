@@ -15,6 +15,7 @@ from config import (
     SIGNAL_COOLDOWN_15M, SIGNAL_COOLDOWN_30M, SIGNAL_COOLDOWN_1H, SIGNAL_COOLDOWN_4H,
     MAX_OPEN_ORDERS, MAX_SWING, MAX_SCALP, DAILY_REPORT_HOUR,
     MONITOR_INTERVAL_SEC, MAX_HOLD_HOURS, PROFIT_ALERT_PCT, ALERT_COOLDOWN,
+    PARTIAL_CLOSE_AT_TP1, TP1_CLOSE_PCT, TP1_MONITOR_SEC,
 )
 
 # 各時間框架冷卻秒數對照表
@@ -108,13 +109,25 @@ def _get_daily_stats() -> dict:
 
 # ── 持倉管理 ───────────────────────────────────────────────
 
-def _on_order_placed(symbol: str, timeframe: str, order_id: str, side: str = "LONG") -> None:
+def _on_order_placed(
+    symbol: str, timeframe: str, order_id: str, side: str = "LONG",
+    *, entry_price: float = None, tp1: float = None, qty: float = None,
+) -> None:
     """下單成功後更新持倉狀態 + 今日確認計數"""
-    _open_orders[symbol] = {"tf": timeframe, "ts": time.time(), "side": side}
+    _open_orders[symbol] = {
+        "tf":           timeframe,
+        "ts":           time.time(),
+        "side":         side,
+        "entry":        entry_price,    # 進場價（保本點）
+        "tp1":          tp1,            # 部分止盈觸發價（1:1 RR）
+        "qty":          qty,            # 下單數量（估算）
+        "partial_done": False,          # TP1 是否已觸發
+    }
     _reset_daily_stats_if_needed()
     _daily_stats["confirmed"] = _daily_stats.get("confirmed", 0) + 1
     _save_state()
-    logger.info(f"📋 持倉新增：{symbol} ({timeframe} {side})")
+    tp1_str = f" | TP1={tp1}" if tp1 else ""
+    logger.info(f"📋 持倉新增：{symbol} ({timeframe} {side}){tp1_str}")
 
 
 def _can_open(timeframe: str, symbol: str) -> bool:
@@ -240,6 +253,129 @@ async def _scan_loop() -> None:
         await _sync_positions()
         await _scan_once()
         await asyncio.sleep(SCAN_INTERVAL_SEC)
+
+
+# ── TP1 部分止盈 ────────────────────────────────────────────
+
+async def _check_tp1_partial_close() -> None:
+    """
+    每 TP1_MONITOR_SEC 秒掃描一次，若持倉達到 TP1（1:1 RR）：
+      1. 自動平倉 50%（TP1_CLOSE_PCT）
+      2. 在進場價設定保本停損
+      3. 推播 Telegram 通知
+    同一持倉只觸發一次（partial_done flag）。
+    """
+    if not PARTIAL_CLOSE_AT_TP1:
+        return
+
+    # 找出有 tp1 且尚未觸發的持倉記錄
+    candidates = {
+        sym: info for sym, info in _open_orders.items()
+        if isinstance(info, dict)
+        and info.get("tp1") is not None
+        and not info.get("partial_done", False)
+    }
+    if not candidates:
+        return
+
+    try:
+        loop      = asyncio.get_event_loop()
+        positions = await loop.run_in_executor(None, bingx.get_positions_detail)
+    except Exception as e:
+        logger.warning(f"TP1 監控取得持倉失敗：{e}")
+        return
+
+    pos_map = {p["symbol"]: p for p in positions}
+
+    for sym, info in candidates.items():
+        p = pos_map.get(sym)
+        if not p:
+            continue   # 持倉已關閉，等 _sync_positions 清理
+
+        side      = info.get("side", "LONG")
+        tp1       = info["tp1"]
+        entry     = info.get("entry") or p["entry_price"]
+        orig_qty  = info.get("qty")  or p["qty"]
+        mark      = p["mark_price"]
+
+        # 是否已達到 TP1
+        tp1_hit = (side == "LONG"  and mark >= tp1) or \
+                  (side == "SHORT" and mark <= tp1)
+        if not tp1_hit:
+            continue
+
+        logger.info(f"🎯 {sym} TP1 達標！現價 {mark:.4f} | TP1 {tp1:.4f}")
+
+        # ── 計算平倉量（50%）──────────────────────────────────
+        decimal  = bingx.get_qty_decimal(sym)
+        half_qty = round(orig_qty * TP1_CLOSE_PCT, decimal)
+        if half_qty <= 0:
+            logger.warning(f"⚠️ {sym} TP1 平倉量 {half_qty} 無效，跳過")
+            continue
+
+        # ── 平倉 50% ─────────────────────────────────────────
+        try:
+            ok = await loop.run_in_executor(
+                None, bingx.close_position, sym, side, half_qty
+            )
+        except Exception as e:
+            logger.error(f"TP1 平倉失敗 {sym}：{e}")
+            try:
+                await tg_module.send_text(
+                    f"⚠️ {sym} TP1 自動平倉失敗：{e}\n請手動平倉約 {half_qty} 張"
+                )
+            except Exception:
+                pass
+            continue
+
+        if not ok:
+            logger.warning(f"⚠️ {sym} TP1 平倉回傳失敗，下次再試")
+            continue
+
+        # ── 標記已觸發（防止重複平倉）────────────────────────
+        _open_orders[sym]["partial_done"] = True
+        _save_state()
+
+        # ── 在進場價設定保本停損 ──────────────────────────────
+        be_ok = False
+        try:
+            be_ok = await loop.run_in_executor(
+                None, bingx.place_breakeven_stop, sym, side, half_qty, entry
+            )
+        except Exception as e:
+            logger.error(f"保本停損設定失敗 {sym}：{e}")
+
+        # ── 推播通知 ─────────────────────────────────────────
+        direction  = "LONG 🔺" if side == "LONG"  else "SHORT 🔻"
+        be_status  = f"✅ 已移至進場價 {entry:.4f}（保本）" \
+                     if be_ok else "⚠️ 移動停損失敗，請手動確認"
+        text = (
+            f"{'━'*22}\n"
+            f"🎯 TP1 達標 — 部分止盈！\n"
+            f"{'━'*22}\n"
+            f"幣對：{sym}  方向：{direction}\n"
+            f"TP1：{tp1:.4f}  現價：{mark:.4f}\n\n"
+            f"✅ 已平倉 {TP1_CLOSE_PCT*100:.0f}%（{half_qty} 張）\n"
+            f"🛡 停損：{be_status}\n\n"
+            f"📈 剩餘 {(1-TP1_CLOSE_PCT)*100:.0f}% 繼續等待 TP2\n"
+            f"{'━'*22}"
+        )
+        try:
+            await tg_module.send_text(text)
+        except Exception as e:
+            logger.error(f"TP1 通知失敗：{e}")
+
+        logger.info(
+            f"✅ {sym} TP1 部分止盈完成：平倉 {half_qty}，保本停損 {'OK' if be_ok else 'FAIL'}"
+        )
+
+
+async def _tp1_monitor_loop() -> None:
+    """每 TP1_MONITOR_SEC 秒掃描 TP1 部分止盈條件"""
+    logger.info(f"🎯 TP1 監控啟動（間隔 {TP1_MONITOR_SEC}s）")
+    while True:
+        await asyncio.sleep(TP1_MONITOR_SEC)
+        await _check_tp1_partial_close()
 
 
 # ── 持倉監控 ───────────────────────────────────────────────
@@ -396,9 +532,10 @@ async def main() -> None:
     )
 
     try:
-        # 掃描迴圈 + 持倉監控 + 日報排程同時執行
+        # 掃描迴圈 + TP1 監控 + 持倉健康 + 日報排程同時執行
         await asyncio.gather(
             _scan_loop(),
+            _tp1_monitor_loop(),
             _monitor_positions_loop(),
             _daily_report_loop(),
         )
